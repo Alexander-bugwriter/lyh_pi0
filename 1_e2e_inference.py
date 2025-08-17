@@ -28,16 +28,17 @@ import lerobot.common.utils.utils
 lerobot.common.utils.utils.is_torch_device_available = patched_is_torch_device_available
 
 # 强制设置设备为 "cuda" 而不是 "cuda:0"
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'  # 使用GPU 1
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # 使用GPU 1
 
 from pi0 import PI0FASTPolicy, PI0Policy
+from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
 # from V3R_pi0 import PI0FASTPolicy, PI0Policy
 
 PATH_TO_PI_MODEL = (
-    "/home/pi0_model_checkpoint/pytorch/pi0_libero"
+    "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_base"
 )
 PATH_TO_PI_FAST_MODEL = (
-    "/home/pi0_model_checkpoint/pytorch/pi0_fast_libero"
+    "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_fast_base"
 )
 model_type = "pi0"  # or "pi0fast"
 
