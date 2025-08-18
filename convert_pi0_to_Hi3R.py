@@ -127,16 +127,15 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
             raise FileNotFoundError(f"Config file not found: {config_path}")
             
         with open(config_path, 'r') as f:
-            config_dict = json.load(f)
+            original_config_dict = json.load(f)
         
-        # 修复配置
-        config_dict['type'] = 'pi0'
-        # 关键修复2：强制使用CPU进行转换
-        config_dict['device'] = 'cpu'
+        # 备份原始配置
+        original_config_backup = original_config_dict.copy()
         
-        # 保存修改后的配置
-        with open(config_path, 'w') as f:
-            json.dump(config_dict, f, indent=2)
+        # 为转换过程创建工作配置（不修改原始文件）
+        working_config_dict = original_config_dict.copy()
+        working_config_dict['type'] = 'pi0'
+        working_config_dict['device'] = 'cpu'
         
         # 关键修复3：使用新的智能加载函数
         print("Loading original PI0 model on CPU (skipping spatial encoder)...")
@@ -152,21 +151,22 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         
         print(f"Original model weights loaded. Parameters: {len(original_state_dict)}, Format: {original_format}")
         
-        # 关键修复4：创建新模型时也要小心，避免空间编码器加载
+        # 关键修复4：创建新模型时使用临时配置文件，不修改原始配置
         print("Creating new model with global head (skipping spatial encoder)...")
         
-        # 临时修改配置，禁用空间编码器
-        temp_config_path = os.path.join(original_model_path, "config_temp.json")
-        with open(config_path, 'r') as f:
-            temp_config = json.load(f)
+        # 创建临时配置文件用于Hi3R加载
+        temp_config_path = os.path.join(original_model_path, "config_temp_hi3r.json")
+        temp_hi3r_config = working_config_dict.copy()
         
-        # 临时禁用空间编码器相关功能，避免CUT3R加载
-        original_spatial_config = temp_config.get('use_spatial_encoder', True)
-        temp_config['use_spatial_encoder'] = False
-        temp_config['device'] = 'cpu'
+        # 为Hi3R添加必要的配置，但不影响原始配置
+        temp_hi3r_config.update({
+            'use_spatial_encoder': False,
+            'use_history_features': False,
+            'device': 'cpu'
+        })
         
         with open(temp_config_path, 'w') as f:
-            json.dump(temp_config, f, indent=2)
+            json.dump(temp_hi3r_config, f, indent=2)
         
         try:
             # 使用解耦版Hi3R，完全禁用空间编码器
@@ -199,14 +199,15 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
                     if isinstance(new_state_dict[key], torch.Tensor):
                         new_state_dict[key] = new_state_dict[key].cpu().float()
         finally:
-            # 清理临时文件并恢复原始配置
+            # 清理临时配置文件，确保不影响原始配置
             if os.path.exists(temp_config_path):
                 os.remove(temp_config_path)
+                print(f"   Cleaned up temporary config: {temp_config_path}")
             
-            # 恢复原始配置中的空间编码器设置
-            temp_config['use_spatial_encoder'] = original_spatial_config
+            # 确保原始配置文件完全恢复
             with open(config_path, 'w') as f:
-                json.dump(temp_config, f, indent=2)
+                json.dump(original_config_backup, f, indent=2)
+                print("   Original config file restored")
         
         print(f"New model created. Parameters: {len(new_state_dict)}")
         
@@ -369,10 +370,29 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         # 关键修复8：使用新的智能保存函数，保持原格式
         save_model_weights(new_state_dict, output_model_path, original_format)
         
-        # 保存配置文件
-        import shutil
-        shutil.copy2(config_path, os.path.join(output_model_path, "config.json"))
-        print("   Config file copied")
+        # 保存配置文件（基于原始配置创建Hi3R配置）
+        output_config_dict = original_config_backup.copy()
+        # 为Hi3R添加必要的配置字段
+        output_config_dict.update({
+            'type': 'hi3r',  # 标记为Hi3R模型
+            'use_spatial_encoder': False,  # 可以根据需要修改
+            'use_history_features': False,  # 可以根据需要修改
+            'spatial_camera_config': {
+                "base_0_rgb": False,
+                "left_wrist_0_rgb": False,
+                "right_wrist_0_rgb": False,
+            },
+            'history_camera_config': {
+                "base_0_rgb": False,
+                "left_wrist_0_rgb": False,
+                "right_wrist_0_rgb": False,
+            }
+        })
+        
+        output_config_path = os.path.join(output_model_path, "config.json")
+        with open(output_config_path, 'w') as f:
+            json.dump(output_config_dict, f, indent=2)
+        print("   Hi3R config file saved")
         
         # 保存tokenizer相关文件
         tokenizer_files = [
