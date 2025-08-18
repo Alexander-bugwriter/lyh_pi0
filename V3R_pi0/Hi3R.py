@@ -15,12 +15,75 @@ from .utils import (
     sample_beta,
 )
 
+# 🔥 新增：支持safetensors
+try:
+    from safetensors.torch import load_file as load_safetensors
+    SAFETENSORS_AVAILABLE = True
+except ImportError:
+    print("⚠️  safetensors未安装，只支持.bin格式")
+    SAFETENSORS_AVAILABLE = False
+
 # 复制必要的常量
 IMAGE_KEYS = (
     "base_0_rgb",
     "left_wrist_0_rgb", 
     "right_wrist_0_rgb",
 )
+
+
+def load_model_weights_hi3r(model_path: str, map_location='cpu'):
+    """
+    智能加载模型权重，支持.bin和.safetensors格式 (Hi3R版本)
+    
+    Args:
+        model_path: 模型目录路径
+        map_location: 加载位置
+    
+    Returns:
+        state_dict: 模型权重字典
+        file_format: 文件格式 ('bin' 或 'safetensors')
+    """
+    import os
+    
+    # 🔥 优先检查safetensors格式
+    safetensors_file = os.path.join(model_path, "model.safetensors")
+    bin_file = os.path.join(model_path, "pytorch_model.bin")
+    
+    if os.path.exists(safetensors_file) and SAFETENSORS_AVAILABLE:
+        print(f"   📦 Hi3R加载safetensors格式: {safetensors_file}")
+        state_dict = load_safetensors(safetensors_file)
+        # safetensors加载后需要移动到指定设备
+        if map_location != 'cpu':
+            for key in state_dict:
+                if isinstance(state_dict[key], torch.Tensor):
+                    state_dict[key] = state_dict[key].to(map_location)
+        return state_dict, 'safetensors'
+    
+    elif os.path.exists(bin_file):
+        print(f"   📦 Hi3R加载bin格式: {bin_file}")
+        state_dict = torch.load(bin_file, map_location=map_location)
+        return state_dict, 'bin'
+    
+    else:
+        # 🔥 更详细的错误信息
+        available_files = []
+        try:
+            for file in os.listdir(model_path):
+                if file.endswith(('.bin', '.safetensors', '.pth')):
+                    file_size = os.path.getsize(os.path.join(model_path, file)) / (1024*1024)
+                    available_files.append(f"{file} ({file_size:.1f}MB)")
+        except:
+            pass
+            
+        error_msg = f"Hi3R未找到支持的模型权重文件！\n"
+        error_msg += f"检查路径: {model_path}\n"
+        error_msg += f"期望文件: model.safetensors 或 pytorch_model.bin\n"
+        if available_files:
+            error_msg += f"可用文件: {available_files}"
+        else:
+            error_msg += "目录中没有找到权重文件"
+            
+        raise FileNotFoundError(error_msg)
 
 
 class Hi3RConfig:
@@ -318,11 +381,14 @@ class Hi3RPolicy:
 
     @classmethod
     def from_pretrained(cls, model_path: str, config_overrides: dict = None):
-        """从预训练模型加载"""
+        """从预训练模型加载 - 🔥 支持safetensors"""
         import json
         import os
         
         config_path = os.path.join(model_path, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+            
         with open(config_path, 'r') as f:
             config_dict = json.load(f)
         
@@ -333,12 +399,32 @@ class Hi3RPolicy:
         # 创建模型
         policy = cls(config)
         
-        # 加载权重
-        model_file = os.path.join(model_path, "pytorch_model.bin")
-        if os.path.exists(model_file):
-            state_dict = torch.load(model_file, map_location='cpu')
-            policy.model.load_state_dict(state_dict, strict=False)
-            print(f"✅ 从 {model_path} 加载模型权重")
+        # 🔥 使用新的智能加载函数
+        try:
+            state_dict, file_format = load_model_weights_hi3r(model_path, 'cpu')
+            
+            # 尝试加载权重，允许部分不匹配
+            missing_keys, unexpected_keys = policy.model.load_state_dict(state_dict, strict=False)
+            
+            if missing_keys:
+                print(f"⚠️  缺少的权重键: {len(missing_keys)} 个")
+                for key in missing_keys[:5]:  # 只显示前5个
+                    print(f"   - {key}")
+                if len(missing_keys) > 5:
+                    print(f"   ... 还有 {len(missing_keys) - 5} 个")
+            
+            if unexpected_keys:
+                print(f"⚠️  意外的权重键: {len(unexpected_keys)} 个")
+                for key in unexpected_keys[:5]:  # 只显示前5个
+                    print(f"   - {key}")
+                if len(unexpected_keys) > 5:
+                    print(f"   ... 还有 {len(unexpected_keys) - 5} 个")
+            
+            print(f"✅ 从 {model_path} 加载模型权重完成 (格式: {file_format})")
+            
+        except Exception as e:
+            print(f"⚠️  权重加载警告: {e}")
+            print("   继续使用随机初始化的权重")
         
         return policy
 
