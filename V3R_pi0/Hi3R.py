@@ -15,12 +15,12 @@ from .utils import (
     sample_beta,
 )
 
-# 🔥 新增：支持safetensors
+# 新增：支持safetensors
 try:
     from safetensors.torch import load_file as load_safetensors
     SAFETENSORS_AVAILABLE = True
 except ImportError:
-    print("⚠️  safetensors未安装，只支持.bin格式")
+    print("WARNING: safetensors not installed, only .bin format supported")
     SAFETENSORS_AVAILABLE = False
 
 # 复制必要的常量
@@ -45,12 +45,12 @@ def load_model_weights_hi3r(model_path: str, map_location='cpu'):
     """
     import os
     
-    # 🔥 优先检查safetensors格式
+    # 优先检查safetensors格式
     safetensors_file = os.path.join(model_path, "model.safetensors")
     bin_file = os.path.join(model_path, "pytorch_model.bin")
     
     if os.path.exists(safetensors_file) and SAFETENSORS_AVAILABLE:
-        print(f"   📦 Hi3R加载safetensors格式: {safetensors_file}")
+        print(f"   Hi3R loading safetensors format: {safetensors_file}")
         state_dict = load_safetensors(safetensors_file)
         # safetensors加载后需要移动到指定设备
         if map_location != 'cpu':
@@ -60,12 +60,12 @@ def load_model_weights_hi3r(model_path: str, map_location='cpu'):
         return state_dict, 'safetensors'
     
     elif os.path.exists(bin_file):
-        print(f"   📦 Hi3R加载bin格式: {bin_file}")
+        print(f"   Hi3R loading bin format: {bin_file}")
         state_dict = torch.load(bin_file, map_location=map_location)
         return state_dict, 'bin'
     
     else:
-        # 🔥 更详细的错误信息
+        # 更详细的错误信息
         available_files = []
         try:
             for file in os.listdir(model_path):
@@ -75,13 +75,13 @@ def load_model_weights_hi3r(model_path: str, map_location='cpu'):
         except:
             pass
             
-        error_msg = f"Hi3R未找到支持的模型权重文件！\n"
-        error_msg += f"检查路径: {model_path}\n"
-        error_msg += f"期望文件: model.safetensors 或 pytorch_model.bin\n"
+        error_msg = f"Hi3R: No supported model weight file found!\n"
+        error_msg += f"Checked path: {model_path}\n"
+        error_msg += f"Expected files: model.safetensors or pytorch_model.bin\n"
         if available_files:
-            error_msg += f"可用文件: {available_files}"
+            error_msg += f"Available files: {available_files}"
         else:
-            error_msg += "目录中没有找到权重文件"
+            error_msg += "No weight files found in directory"
             
         raise FileNotFoundError(error_msg)
 
@@ -111,7 +111,7 @@ class Hi3RConfig:
         train_state_proj: bool = False,
         attention_implementation: str = "eager",
         
-        # 🔥 空间编码器控制 - 完全可选
+        # 空间编码器控制 - 完全可选
         use_spatial_encoder: bool = False,
         spatial_tower: str = "cut3r",
         spatial_tower_select_feature: str = "all",
@@ -148,7 +148,7 @@ class Hi3RConfig:
         self.spatial_tower = spatial_tower
         self.spatial_tower_select_feature = spatial_tower_select_feature
         self.spatial_camera_config = spatial_camera_config or {
-            "base_0_rgb": False,  # 🔥 默认禁用，避免意外加载
+            "base_0_rgb": False,  # 默认禁用，避免意外加载
             "left_wrist_0_rgb": False,
             "right_wrist_0_rgb": False,
         }
@@ -158,7 +158,7 @@ class Hi3RConfig:
         self.num_sampled_history_frames = num_sampled_history_frames
         self.history_sampling_method = history_sampling_method
         self.history_camera_config = history_camera_config or {
-            "base_0_rgb": False,  # 🔥 默认禁用
+            "base_0_rgb": False,  # 默认禁用
             "left_wrist_0_rgb": False,
             "right_wrist_0_rgb": False,
         }
@@ -381,13 +381,13 @@ class Hi3RPolicy:
 
     @classmethod
     def from_pretrained(cls, model_path: str, config_overrides: dict = None):
-        """从预训练模型加载 - 🔥 支持safetensors"""
+        """从预训练模型加载 - 支持safetensors"""
         import json
         import os
         
         config_path = os.path.join(model_path, "config.json")
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+            raise FileNotFoundError(f"Config file not found: {config_path}")
             
         with open(config_path, 'r') as f:
             config_dict = json.load(f)
@@ -399,7 +399,7 @@ class Hi3RPolicy:
         # 创建模型
         policy = cls(config)
         
-        # 🔥 使用新的智能加载函数
+        # 使用新的智能加载函数
         try:
             state_dict, file_format = load_model_weights_hi3r(model_path, 'cpu')
             
@@ -407,24 +407,24 @@ class Hi3RPolicy:
             missing_keys, unexpected_keys = policy.model.load_state_dict(state_dict, strict=False)
             
             if missing_keys:
-                print(f"⚠️  缺少的权重键: {len(missing_keys)} 个")
+                print(f"Missing weight keys: {len(missing_keys)} items")
                 for key in missing_keys[:5]:  # 只显示前5个
                     print(f"   - {key}")
                 if len(missing_keys) > 5:
-                    print(f"   ... 还有 {len(missing_keys) - 5} 个")
+                    print(f"   ... and {len(missing_keys) - 5} more")
             
             if unexpected_keys:
-                print(f"⚠️  意外的权重键: {len(unexpected_keys)} 个")
+                print(f"Unexpected weight keys: {len(unexpected_keys)} items")
                 for key in unexpected_keys[:5]:  # 只显示前5个
                     print(f"   - {key}")
                 if len(unexpected_keys) > 5:
-                    print(f"   ... 还有 {len(unexpected_keys) - 5} 个")
+                    print(f"   ... and {len(unexpected_keys) - 5} more")
             
-            print(f"✅ 从 {model_path} 加载模型权重完成 (格式: {file_format})")
+            print(f"Model weights loaded from {model_path} (format: {file_format})")
             
         except Exception as e:
-            print(f"⚠️  权重加载警告: {e}")
-            print("   继续使用随机初始化的权重")
+            print(f"Weight loading warning: {e}")
+            print("   Continuing with randomly initialized weights")
         
         return policy
 
@@ -436,13 +436,13 @@ class Hi3RFlowMatching(nn.Module):
         super().__init__()
         self.config = config
         
-        # 🔥 创建PaliGemma配置（可选空间编码器）
+        # 创建PaliGemma配置（可选空间编码器）
         paligemma_config = PaliGemmaWithExpertConfig(
             freeze_vision_encoder=config.freeze_vision_encoder,
             train_expert_only=config.train_expert_only,
             attention_implementation=config.attention_implementation,
             
-            # 🔥 关键：完全受控的空间编码器配置
+            # 关键：完全受控的空间编码器配置
             use_spatial_encoder=config.use_spatial_encoder,
             spatial_tower=config.spatial_tower,
             spatial_tower_select_feature=config.spatial_tower_select_feature,
@@ -463,7 +463,7 @@ class Hi3RFlowMatching(nn.Module):
         # PaliGemma + Action Expert
         self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_config)
         
-        # 🔥 全局轨迹专家（与action expert同构）
+        # 全局轨迹专家（与action expert同构）
         self.global_trajectory_expert = GemmaForCausalLM(config.gemma_expert_config)
         self.global_trajectory_expert.model.embed_tokens = None  # 移除词嵌入
         
@@ -506,7 +506,7 @@ class Hi3RFlowMatching(nn.Module):
         device = images.device
         dtype = images.dtype
 
-        # 🔥 图像嵌入（支持可选空间编码器）
+        # 图像嵌入（支持可选空间编码器）
         img_emb = self.paligemma_with_expert.embed_image(images)
         
         if img_emb.dim() == 4:  # (B, N, L, D)
@@ -549,7 +549,7 @@ class Hi3RFlowMatching(nn.Module):
             min_period=4e-3, max_period=4.0, device=device,
         ).type(dtype=dtype)
 
-        # 🔥 选择不同的动作投影
+        # 选择不同的动作投影
         if use_global_proj:
             action_emb = self.global_trajectory_in_proj(noisy_actions)
         else:
@@ -731,7 +731,7 @@ class Hi3RFlowMatching(nn.Module):
             images, img_masks, lang_tokens, lang_masks
         )
         
-        # 🔥 1. 全局轨迹头前向传播
+        # 1. 全局轨迹头前向传播
         time_expanded = time[:, None, None]
         x_t_global = time_expanded * noise + (1 - time_expanded) * actions
         u_t_global = noise - actions
@@ -741,13 +741,13 @@ class Hi3RFlowMatching(nn.Module):
             state, x_t_global, time
         )
         
-        # 🔥 2. 实时action expert前向传播（使用全局轨迹作为输入）
+        # 2. 实时action expert前向传播（使用全局轨迹作为输入）
         final_actions = self.forward_action_expert_with_global_input(
             prefix_embs, prefix_pad_masks, prefix_att_masks,
             state, global_trajectory, time
         )
         
-        # 🔥 3. 计算损失（需要同时训练两个头）
+        # 3. 计算损失（需要同时训练两个头）
         global_losses = F.mse_loss(u_t_global, global_trajectory, reduction="none")
         action_losses = F.mse_loss(actions, final_actions, reduction="none")
         
@@ -772,7 +772,7 @@ class Hi3RFlowMatching(nn.Module):
             images, img_masks, lang_tokens, lang_masks
         )
         
-        # 🔥 采样过程：先全局规划，再实时细化
+        # 采样过程：先全局规划，再实时细化
         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
         x_t = noise
         time = torch.tensor(1.0, dtype=dtype, device=device)

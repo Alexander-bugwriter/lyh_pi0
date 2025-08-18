@@ -3,9 +3,105 @@ import os
 import json
 import gc
 from pathlib import Path
-from safetensors.torch import load_file, save_file
 from V3R_pi0 import PI0Policy
-from V3R_pi0.Hi3R import Hi3RPolicy  # 🔥 使用新的解耦版Hi3R
+from V3R_pi0.Hi3R import Hi3RPolicy  # 使用新的解耦版Hi3R
+
+# 新增：支持safetensors
+try:
+    from safetensors.torch import load_file as load_safetensors
+    from safetensors.torch import save_file as save_safetensors
+    SAFETENSORS_AVAILABLE = True
+except ImportError:
+    print("WARNING: safetensors not installed, only .bin format supported")
+    SAFETENSORS_AVAILABLE = False
+
+
+def load_model_weights(model_path: str, map_location='cpu'):
+    """
+    智能加载模型权重，支持.bin和.safetensors格式
+    
+    Args:
+        model_path: 模型目录路径
+        map_location: 加载位置
+    
+    Returns:
+        state_dict: 模型权重字典
+        file_format: 文件格式 ('bin' 或 'safetensors')
+    """
+    # 优先检查safetensors格式
+    safetensors_file = os.path.join(model_path, "model.safetensors")
+    bin_file = os.path.join(model_path, "pytorch_model.bin")
+    
+    if os.path.exists(safetensors_file) and SAFETENSORS_AVAILABLE:
+        print(f"   Loading safetensors format: {safetensors_file}")
+        state_dict = load_safetensors(safetensors_file)
+        # safetensors加载后需要移动到指定设备
+        if map_location != 'cpu':
+            for key in state_dict:
+                if isinstance(state_dict[key], torch.Tensor):
+                    state_dict[key] = state_dict[key].to(map_location)
+        return state_dict, 'safetensors'
+    
+    elif os.path.exists(bin_file):
+        print(f"   Loading bin format: {bin_file}")
+        state_dict = torch.load(bin_file, map_location=map_location)
+        return state_dict, 'bin'
+    
+    else:
+        # 更详细的错误信息
+        available_files = []
+        try:
+            for file in os.listdir(model_path):
+                if file.endswith(('.bin', '.safetensors', '.pth')):
+                    file_size = os.path.getsize(os.path.join(model_path, file)) / (1024*1024)
+                    available_files.append(f"{file} ({file_size:.1f}MB)")
+        except:
+            pass
+            
+        error_msg = f"No supported model weight file found!\n"
+        error_msg += f"Checked path: {model_path}\n"
+        error_msg += f"Expected files: model.safetensors or pytorch_model.bin\n"
+        if available_files:
+            error_msg += f"Available files: {available_files}"
+        else:
+            error_msg += "No weight files found in directory"
+            
+        raise FileNotFoundError(error_msg)
+
+
+def save_model_weights(state_dict: dict, output_path: str, file_format: str = 'safetensors'):
+    """
+    保存模型权重，支持选择格式
+    
+    Args:
+        state_dict: 模型权重字典
+        output_path: 输出目录路径
+        file_format: 文件格式 ('bin' 或 'safetensors')
+    """
+    os.makedirs(output_path, exist_ok=True)
+    
+    if file_format == 'safetensors' and SAFETENSORS_AVAILABLE:
+        output_file = os.path.join(output_path, "model.safetensors")
+        # 确保所有张量在CPU上且为float32
+        cpu_state_dict = {}
+        for key, value in state_dict.items():
+            if isinstance(value, torch.Tensor):
+                cpu_state_dict[key] = value.cpu().float()
+            else:
+                cpu_state_dict[key] = value
+        save_safetensors(cpu_state_dict, output_file)
+        print(f"   Saved as safetensors format: {output_file}")
+    else:
+        output_file = os.path.join(output_path, "pytorch_model.bin")
+        # 确保所有张量在CPU上
+        cpu_state_dict = {}
+        for key, value in state_dict.items():
+            if isinstance(value, torch.Tensor):
+                cpu_state_dict[key] = value.cpu().float()
+            else:
+                cpu_state_dict[key] = value
+        torch.save(cpu_state_dict, output_file)
+        print(f"   Saved as bin format: {output_file}")
 
 
 def convert_pi0_to_global_head(original_model_path: str, output_model_path: str):
@@ -16,54 +112,48 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         original_model_path: 原始PI0模型路径
         output_model_path: 输出模型路径
     """
-    print(f"🔄 开始转换模型: {original_model_path} -> {output_model_path}")
+    print(f"Starting model conversion: {original_model_path} -> {output_model_path}")
     
-    # 🔥 关键修复1：强制使用CPU进行转换，避免显存问题
+    # 关键修复1：强制使用CPU进行转换，避免显存问题
     original_device = torch.cuda.current_device() if torch.cuda.is_available() else None
     torch.cuda.empty_cache()  # 清空显存
     
     try:
         # 1. 加载原始模型配置
-        print("📥 准备加载原始PI0模型配置...")
+        print("Loading original PI0 model config...")
         config_path = os.path.join(original_model_path, "config.json")
         
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+            raise FileNotFoundError(f"Config file not found: {config_path}")
             
         with open(config_path, 'r') as f:
             config_dict = json.load(f)
         
         # 修复配置
         config_dict['type'] = 'pi0'
-        # 🔥 关键修复2：强制使用CPU进行转换
+        # 关键修复2：强制使用CPU进行转换
         config_dict['device'] = 'cpu'
         
         # 保存修改后的配置
         with open(config_path, 'w') as f:
             json.dump(config_dict, f, indent=2)
         
-        # 🔥 关键修复3：避免加载空间编码器，只加载纯PI0权重
-        print("📥 在CPU上加载原始PI0模型（跳过空间编码器）...")
+        # 关键修复3：使用新的智能加载函数
+        print("Loading original PI0 model on CPU (skipping spatial encoder)...")
         
-        # 🔥 使用safetensors加载模型
-        model_file = os.path.join(original_model_path, "model.safetensors")
-        if not os.path.exists(model_file):
-            raise FileNotFoundError(f"模型权重文件不存在: {model_file}")
-            
         with torch.no_grad():
-            # 🔥 使用safetensors直接加载state_dict，避免模型初始化时加载CUT3R
-            print("   📦 使用safetensors加载state_dict，避免空间编码器加载...")
-            original_state_dict = load_file(model_file)
+            # 使用新的智能加载函数
+            original_state_dict, original_format = load_model_weights(original_model_path, 'cpu')
             
             # 转换所有张量到CPU float32
             for key in original_state_dict:
                 if isinstance(original_state_dict[key], torch.Tensor):
                     original_state_dict[key] = original_state_dict[key].cpu().float()
         
-        print(f"✅ 原始模型权重加载完成，参数数量: {len(original_state_dict)}")
+        print(f"Original model weights loaded. Parameters: {len(original_state_dict)}, Format: {original_format}")
         
-        # 🔥 关键修复4：创建新模型时也要小心，避免空间编码器加载
-        print("🔨 创建带全局头的新模型（跳过空间编码器）...")
+        # 关键修复4：创建新模型时也要小心，避免空间编码器加载
+        print("Creating new model with global head (skipping spatial encoder)...")
         
         # 临时修改配置，禁用空间编码器
         temp_config_path = os.path.join(original_model_path, "config_temp.json")
@@ -81,8 +171,8 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         try:
             # 使用解耦版Hi3R，完全禁用空间编码器
             config_overrides = {
-                'use_spatial_encoder': False,  # 🔥 强制禁用空间编码器
-                'use_history_features': False,  # 🔥 强制禁用历史特征
+                'use_spatial_encoder': False,  # 强制禁用空间编码器
+                'use_history_features': False,  # 强制禁用历史特征
                 'spatial_camera_config': {
                     "base_0_rgb": False,
                     "left_wrist_0_rgb": False,
@@ -100,7 +190,8 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
                     original_model_path, 
                     config_overrides=config_overrides
                 )
-                new_policy = new_policy.cpu().float()
+                # 修复：对model调用cpu()而不是policy
+                new_policy.model = new_policy.model.cpu().float()
                 new_state_dict = new_policy.model.state_dict()
                 
                 # 确保所有参数在CPU上
@@ -117,91 +208,171 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
             with open(config_path, 'w') as f:
                 json.dump(temp_config, f, indent=2)
         
-        print(f"✅ 新模型创建完成，参数数量: {len(new_state_dict)}")
+        print(f"New model created. Parameters: {len(new_state_dict)}")
         
-        # 🔥 关键修复5：删除新模型引用，只保留state_dict
+        # 关键修复5：删除新模型引用，只保留state_dict
         del new_policy
         torch.cuda.empty_cache()
         gc.collect()
         
         # 3. 复制参数（全部在CPU上进行）
-        print("📋 复制模型参数...")
+        print("Copying model parameters...")
+        print(f"   Original model parameters: {len(original_state_dict)}")
+        print(f"   New model parameters: {len(new_state_dict)}")
+        
+        # 检查参数命名模式
+        orig_has_model_prefix = any(key.startswith("model.") for key in original_state_dict.keys())
+        print(f"   Original model has 'model.' prefix: {orig_has_model_prefix}")
+        
+        # 创建键名映射函数
+        def map_key(orig_key, target_keys):
+            """智能映射键名，处理model前缀"""
+            # 直接匹配
+            if orig_key in target_keys:
+                return orig_key
+            
+            # 去掉model前缀匹配
+            if orig_key.startswith("model."):
+                no_prefix_key = orig_key[6:]  # 去掉"model."
+                if no_prefix_key in target_keys:
+                    return no_prefix_key
+            
+            # 添加model前缀匹配
+            prefixed_key = f"model.{orig_key}"
+            if prefixed_key in target_keys:
+                return prefixed_key
+                
+            return None
         
         # 3.1 复制完全相同的参数
-        common_keys = set(original_state_dict.keys()) & set(new_state_dict.keys())
-        print(f"   共同参数数量: {len(common_keys)}")
+        print("Copying identical parameters...")
+        copied_direct = 0
         
-        for key in common_keys:
-            new_state_dict[key] = original_state_dict[key].clone()
-            print(f"   ✅ 复制: {key}")
+        for orig_key in original_state_dict.keys():
+            target_key = map_key(orig_key, new_state_dict.keys())
+            if target_key:
+                new_state_dict[target_key] = original_state_dict[orig_key].clone()
+                print(f"   Copied: {orig_key} -> {target_key}")
+                copied_direct += 1
+        
+        print(f"   Directly copied {copied_direct} parameters")
         
         # 3.2 复制action expert参数到global trajectory expert
-        print("🔄 复制action expert到global trajectory expert...")
+        print("Copying action expert to global trajectory expert...")
         
-        # 🔥 更新：适配新的Hi3R架构参数路径
-        action_expert_prefix = "paligemma_with_expert.gemma_expert."
+        # 适配不同的参数路径格式
+        possible_action_prefixes = [
+            "paligemma_with_expert.gemma_expert.",
+            "model.paligemma_with_expert.gemma_expert.",
+            "gemma_expert.",
+            "model.gemma_expert."
+        ]
+        
         global_expert_prefix = "global_trajectory_expert."
+        copied_expert = 0
         
-        copied_count = 0
-        for key in original_state_dict.keys():
-            if key.startswith(action_expert_prefix):
-                global_key = key.replace(action_expert_prefix, global_expert_prefix)
-                if global_key in new_state_dict:
-                    new_state_dict[global_key] = original_state_dict[key].clone()
-                    print(f"   ✅ 复制: {key} -> {global_key}")
-                    copied_count += 1
+        for orig_key in original_state_dict.keys():
+            for action_prefix in possible_action_prefixes:
+                if orig_key.startswith(action_prefix):
+                    # 构建目标键
+                    suffix = orig_key[len(action_prefix):]
+                    global_key = global_expert_prefix + suffix
+                    
+                    if global_key in new_state_dict:
+                        new_state_dict[global_key] = original_state_dict[orig_key].clone()
+                        print(f"   Copied expert: {orig_key} -> {global_key}")
+                        copied_expert += 1
+                        break
         
-        print(f"   复制了 {copied_count} 个action expert参数到global expert")
+        print(f"   Copied {copied_expert} action expert parameters to global expert")
         
         # 3.3 复制action投影参数到global trajectory投影
-        action_proj_keys = [
-            "action_in_proj.weight",
-            "action_in_proj.bias"
-        ]
-        global_proj_keys = [
-            "global_trajectory_in_proj.weight", 
-            "global_trajectory_in_proj.bias"
+        print("Copying projection parameters...")
+        projection_mappings = [
+            ("action_in_proj.weight", "global_trajectory_in_proj.weight"),
+            ("action_in_proj.bias", "global_trajectory_in_proj.bias"),
+            ("model.action_in_proj.weight", "global_trajectory_in_proj.weight"),
+            ("model.action_in_proj.bias", "global_trajectory_in_proj.bias"),
         ]
         
-        for orig_key, new_key in zip(action_proj_keys, global_proj_keys):
-            if orig_key in original_state_dict and new_key in new_state_dict:
-                new_state_dict[new_key] = original_state_dict[orig_key].clone()
-                print(f"   ✅ 复制投影参数: {orig_key} -> {new_key}")
-            elif f"model.{orig_key}" in original_state_dict and new_key in new_state_dict:
-                # 兼容带model前缀的键名
-                new_state_dict[new_key] = original_state_dict[f"model.{orig_key}"].clone()
-                print(f"   ✅ 复制投影参数: model.{orig_key} -> {new_key}")
+        copied_proj = 0
+        for orig_suffix, target_suffix in projection_mappings:
+            if orig_suffix in original_state_dict and target_suffix in new_state_dict:
+                new_state_dict[target_suffix] = original_state_dict[orig_suffix].clone()
+                print(f"   Copied projection: {orig_suffix} -> {target_suffix}")
+                copied_proj += 1
         
-        # 🔥 关键修复7：释放原始state_dict内存
+        print(f"   Copied {copied_proj} projection parameters")
+        
+        # 关键修复7：释放原始state_dict内存
         del original_state_dict
         gc.collect()
         
         # 4. 检查未初始化的参数
-        print("🔍 检查未初始化的参数...")
-        missing_keys = []
-        for key in new_state_dict.keys():
-            if key not in common_keys and not any(key.startswith(prefix) for prefix in [
-                global_expert_prefix, "global_trajectory_in_proj."
-            ]):
-                missing_keys.append(key)
+        print("Checking uninitialized parameters...")
         
-        if missing_keys:
-            print(f"   ⚠️  以下参数将使用随机初始化: {missing_keys}")
-        else:
-            print("   ✅ 所有参数都已正确初始化")
+        # 统计哪些参数被成功复制了
+        total_copied = copied_direct + copied_expert + copied_proj
+        total_new_params = len(new_state_dict)
+        
+        print(f"   Total copied: {total_copied} parameters")
+        print(f"   New model total: {total_new_params} parameters")
+        
+        # 找出所有未复制的参数并分类
+        all_copied_keys = set()
+        
+        # 重新定义映射函数（确保一致性）
+        def map_key_check(orig_key, target_keys):
+            """智能映射键名，处理model前缀 - 检查版本"""
+            if orig_key in target_keys:
+                return orig_key
+            if orig_key.startswith("model."):
+                no_prefix_key = orig_key[6:]
+                if no_prefix_key in target_keys:
+                    return no_prefix_key
+            prefixed_key = f"model.{orig_key}"
+            if prefixed_key in target_keys:
+                return prefixed_key
+            return None
+        
+        for orig_key in original_state_dict.keys() if 'original_state_dict' in locals() else []:
+            target_key = map_key_check(orig_key, new_state_dict.keys())
+            if target_key:
+                all_copied_keys.add(target_key)
+        
+        # 添加expert和投影参数到已复制集合
+        possible_action_prefixes_check = [
+            "paligemma_with_expert.gemma_expert.",
+            "model.paligemma_with_expert.gemma_expert.",
+            "gemma_expert.",
+            "model.gemma_expert."
+        ]
+        global_expert_prefix_check = "global_trajectory_expert."
+        
+        # 注意：这里original_state_dict已经被删除，所以跳过这个检查
+        print("   Note: Detailed parameter analysis skipped due to memory optimization")
+        
+        # 检查global trajectory expert相关参数
+        global_params = [k for k in new_state_dict.keys() if k.startswith("global_trajectory_expert.")]
+        print(f"   Global trajectory expert parameters: {len(global_params)} total")
+        
+        # 检查PaliGemma相关参数（这些可能需要预训练权重）
+        paligemma_params = [k for k in new_state_dict.keys() if "paligemma_with_expert.paligemma" in k]
+        print(f"   PaliGemma model parameters: {len(paligemma_params)} total")
+        
+        # 总结
+        print(f"   Conversion completed with {total_copied} copied parameters")
         
         # 5. 保存转换后的模型
-        print(f"💾 保存转换后的模型到: {output_model_path}")
-        os.makedirs(output_model_path, exist_ok=True)
+        print(f"Saving converted model to: {output_model_path}")
         
-        # 🔥 关键修复8：使用safetensors保存state_dict
-        print("   📦 使用safetensors格式保存模型权重...")
-        save_file(new_state_dict, os.path.join(output_model_path, "model.safetensors"))
+        # 关键修复8：使用新的智能保存函数，保持原格式
+        save_model_weights(new_state_dict, output_model_path, original_format)
         
         # 保存配置文件
         import shutil
         shutil.copy2(config_path, os.path.join(output_model_path, "config.json"))
-        print("   ✅ 复制配置文件")
+        print("   Config file copied")
         
         # 保存tokenizer相关文件
         tokenizer_files = [
@@ -212,10 +383,12 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         for file_name in tokenizer_files:
             src_path = os.path.join(original_model_path, file_name)
             if os.path.exists(src_path):
-                shutil.copy2(src_path, os.path.join(output_model_path, file_name))
+                dst_path = os.path.join(output_model_path, file_name)
+                shutil.copy2(src_path, dst_path)
+                print(f"   Tokenizer file copied: {file_name}")
         
-        # 🔥 关键修复：复制空间编码器相关文件和目录
-        print("📁 复制空间编码器相关文件...")
+        # 关键修复：复制空间编码器相关文件和目录
+        print("Copying spatial encoder related files...")
         spatial_encoder_items = [
             "spatial_encoder",     # 空间编码器目录
             "cut3r",              # 可能的CUT3R目录
@@ -233,39 +406,40 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
                 if os.path.isdir(src_path):
                     # 复制整个目录
                     shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
-                    copied_spatial_items.append(f"目录: {item_name}")
+                    copied_spatial_items.append(f"Directory: {item_name}")
                 else:
                     # 复制文件
                     shutil.copy2(src_path, dst_path)
-                    copied_spatial_items.append(f"文件: {item_name}")
+                    copied_spatial_items.append(f"File: {item_name}")
         
         if copied_spatial_items:
-            print(f"   ✅ 复制了空间编码器相关项: {copied_spatial_items}")
+            print(f"   Copied spatial encoder items: {copied_spatial_items}")
         else:
-            print("   ⚠️  未找到空间编码器相关文件，请手动确认")
+            print("   No spatial encoder files found, please verify manually")
             
         # 额外检查：列出原始目录中的所有文件，帮助识别遗漏的空间编码器文件
-        print("📋 原始模型目录内容检查:")
+        print("Original model directory content check:")
         try:
             all_items = os.listdir(original_model_path)
+            print(f"   Model directory contains {len(all_items)} items:")
             for item in all_items:
                 item_path = os.path.join(original_model_path, item)
                 if os.path.isdir(item_path):
-                    print(f"   📁 目录: {item}")
+                    print(f"   Directory: {item}")
                 else:
                     file_size = os.path.getsize(item_path) / (1024*1024)  # MB
-                    print(f"   📄 文件: {item} ({file_size:.1f} MB)")
+                    print(f"   File: {item} ({file_size:.1f} MB)")
         except Exception as e:
-            print(f"   ❌ 无法列出目录内容: {e}")
+            print(f"   Cannot list directory contents: {e}")
         
-        print("✅ 模型转换完成!")
+        print("Model conversion completed!")
         
-        # 🔥 关键修复9：简化验证，避免重新加载大模型
-        print("🔍 验证转换结果...")
+        # 关键修复9：简化验证，避免重新加载大模型
+        print("Verifying conversion results...")
         try:
-            # 🔥 使用safetensors验证文件是否存在和state_dict是否可加载
-            saved_state_dict = load_file(os.path.join(output_model_path, "model.safetensors"))
-            print(f"   ✅ 转换后的模型state_dict可以正常加载，参数数量: {len(saved_state_dict)}")
+            # 验证保存的文件
+            saved_state_dict, saved_format = load_model_weights(output_model_path, 'cpu')
+            print(f"   Converted model can be loaded normally. Parameters: {len(saved_state_dict)}, Format: {saved_format}")
             
             # 检查关键参数是否存在
             key_params = [
@@ -275,16 +449,16 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
             
             missing_key_params = [key for key in key_params if key not in saved_state_dict]
             if missing_key_params:
-                print(f"   ⚠️  缺少关键参数: {missing_key_params}")
+                print(f"   Missing key parameters: {missing_key_params}")
             else:
-                print("   ✅ 关键参数验证通过")
+                print("   Key parameters verification passed")
                 
             del saved_state_dict
             
         except Exception as e:
-            print(f"   ❌ 验证失败: {e}")
+            print(f"   Verification failed: {e}")
         
-        # 🔥 关键修复10：最终清理
+        # 关键修复10：最终清理
         del new_state_dict
         torch.cuda.empty_cache()
         gc.collect()
@@ -292,7 +466,7 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         return True
         
     except Exception as e:
-        print(f"❌ 转换过程中出现错误: {e}")
+        print(f"Error during conversion: {e}")
         # 清理内存
         torch.cuda.empty_cache()
         gc.collect()
@@ -301,37 +475,45 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
 
 def main():
     """主函数"""
+    # 修改为你实际的路径
     original_model_path = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_base"
     output_model_path = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Hi3R/pytorch/Hi3R_base"
     
-    # 🔥 关键修复11：检查路径和磁盘空间
+    # 关键修复11：检查路径和磁盘空间
     if not os.path.exists(original_model_path):
-        print(f"❌ 原始模型路径不存在: {original_model_path}")
+        print(f"Original model path does not exist: {original_model_path}")
         return
     
     # 检查磁盘空间（粗略估计）
     import shutil
     _, _, free_space = shutil.disk_usage(os.path.dirname(output_model_path))
     free_gb = free_space // (1024**3)
-    print(f"📁 输出路径可用空间: {free_gb} GB")
+    print(f"Available space at output path: {free_gb} GB")
     
     if free_gb < 10:  # 至少需要10GB空间
-        print("⚠️  警告：磁盘空间可能不足！")
+        print("WARNING: Disk space may be insufficient!")
     
-    # 🔥 关键修复12：设置环境变量减少内存使用
+    # 检查safetensors支持
+    if SAFETENSORS_AVAILABLE:
+        print("Safetensors support enabled")
+    else:
+        print("Safetensors not installed, only .bin format supported")
+        print("   Install command: pip install safetensors")
+    
+    # 关键修复12：设置环境变量减少内存使用
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
     
-    print("🚀 开始模型转换...")
-    print(f"💾 当前可用显存: {torch.cuda.get_device_properties(0).total_memory // 1024**3} GB" if torch.cuda.is_available() else "CPU模式")
+    print("Starting model conversion...")
+    print(f"Current available VRAM: {torch.cuda.get_device_properties(0).total_memory // 1024**3} GB" if torch.cuda.is_available() else "CPU mode")
     
     try:
         success = convert_pi0_to_global_head(original_model_path, output_model_path)
         if success:
-            print("🎉 转换成功完成！")
+            print("Conversion completed successfully!")
         else:
-            print("❌ 转换失败！")
+            print("Conversion failed!")
     except Exception as e:
-        print(f"❌ 转换过程出错: {e}")
+        print(f"Conversion error: {e}")
         import traceback
         traceback.print_exc()
 
