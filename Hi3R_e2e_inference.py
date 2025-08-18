@@ -101,7 +101,7 @@ config_overrides = {
     'use_history_features': True,  # 设置为True来启用历史特征
     'spatial_camera_config': {
         "base_0_rgb": True,          # 根据需要启用
-        "left_wrist_0_rgb": False,    # 根据需要启用
+        "left_wrist_0_rgb": True,    # 根据需要启用
         "right_wrist_0_rgb": False,   # 根据需要启用
     },
     #下面的设置不要变，变了会报错。但是我也懒得debug了
