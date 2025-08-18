@@ -104,6 +104,11 @@ config_overrides = {
         "left_wrist_0_rgb": False,    # 根据需要启用
         "right_wrist_0_rgb": False,   # 根据需要启用
     },
+    'history_camera_config': {
+        "base_0_rgb": True,
+        "left_wrist_0_rgb": False,
+        "right_wrist_0_rgb": False,
+    },
 }
 
 try:
