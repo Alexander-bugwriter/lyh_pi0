@@ -3,6 +3,7 @@ import os
 import json
 import gc
 from pathlib import Path
+from safetensors.torch import load_file, save_file
 from V3R_pi0 import PI0Policy
 from V3R_pi0.Hi3R import Hi3RPolicy  # 🔥 使用新的解耦版Hi3R
 
@@ -44,15 +45,15 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         # 🔥 关键修复3：避免加载空间编码器，只加载纯PI0权重
         print("📥 在CPU上加载原始PI0模型（跳过空间编码器）...")
         
-        # 方案1：直接加载state_dict而不初始化完整模型
-        model_file = os.path.join(original_model_path, "pytorch_model.bin")
+        # 🔥 使用safetensors加载模型
+        model_file = os.path.join(original_model_path, "model.safetensors")
         if not os.path.exists(model_file):
             raise FileNotFoundError(f"模型权重文件不存在: {model_file}")
             
         with torch.no_grad():
-            # 直接加载state_dict，避免模型初始化时加载CUT3R
-            print("   📦 直接加载state_dict，避免空间编码器加载...")
-            original_state_dict = torch.load(model_file, map_location='cpu')
+            # 🔥 使用safetensors直接加载state_dict，避免模型初始化时加载CUT3R
+            print("   📦 使用safetensors加载state_dict，避免空间编码器加载...")
+            original_state_dict = load_file(model_file)
             
             # 转换所有张量到CPU float32
             for key in original_state_dict:
@@ -193,8 +194,9 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         print(f"💾 保存转换后的模型到: {output_model_path}")
         os.makedirs(output_model_path, exist_ok=True)
         
-        # 🔥 关键修复8：直接保存state_dict，不创建新的模型实例
-        torch.save(new_state_dict, os.path.join(output_model_path, "pytorch_model.bin"))
+        # 🔥 关键修复8：使用safetensors保存state_dict
+        print("   📦 使用safetensors格式保存模型权重...")
+        save_file(new_state_dict, os.path.join(output_model_path, "model.safetensors"))
         
         # 保存配置文件
         import shutil
@@ -261,11 +263,8 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
         # 🔥 关键修复9：简化验证，避免重新加载大模型
         print("🔍 验证转换结果...")
         try:
-            # 只验证文件是否存在和state_dict是否可加载
-            saved_state_dict = torch.load(
-                os.path.join(output_model_path, "pytorch_model.bin"), 
-                map_location='cpu'
-            )
+            # 🔥 使用safetensors验证文件是否存在和state_dict是否可加载
+            saved_state_dict = load_file(os.path.join(output_model_path, "model.safetensors"))
             print(f"   ✅ 转换后的模型state_dict可以正常加载，参数数量: {len(saved_state_dict)}")
             
             # 检查关键参数是否存在
@@ -302,8 +301,8 @@ def convert_pi0_to_global_head(original_model_path: str, output_model_path: str)
 
 def main():
     """主函数"""
-    original_model_path = "/home/pi0_model_checkpoint/pytorch/pi0_base"
-    output_model_path = "/home/pi0_model_checkpoint/pytorch/Hi3R_base"
+    original_model_path = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_base"
+    output_model_path = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/Hi3R/pytorch/Hi3R_base"
     
     # 🔥 关键修复11：检查路径和磁盘空间
     if not os.path.exists(original_model_path):
