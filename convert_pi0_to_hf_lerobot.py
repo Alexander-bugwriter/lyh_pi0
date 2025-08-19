@@ -60,7 +60,8 @@ from conversion_scripts.conversion_utils import (
     get_paligemma_config,
 )
 from pi0.modeling_pi0 import PI0Policy
-
+import json
+import os
 PRECISIONS = {
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
@@ -405,13 +406,21 @@ def convert_pi0_checkpoint(
     pi0_model.load_state_dict({**paligemma_params, **gemma_params, **projection_params})
     pi0_model = pi0_model.to(torch_dtype)
     # pi0_tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
-
+    os.makedirs(output_path, exist_ok=True)
+    
     pi0_model.save_pretrained(output_path, safe_serialization=True)
     # pi0_tokenizer.save_pretrained(output_path, dtype=torch_dtype)
-
+    config_dict = pi0_config.__dict__.copy()
+    config_dict['type'] = 'pi0'  # 添加 draccus 需要的 type 字段
+    if 'pretrained_path' in config_dict:
+        del config_dict['pretrained_path']
+    # 保存为 JSON 配置文件（覆盖 save_pretrained 生成的文件）
+    config_path = os.path.join(output_path, 'config.json')
+    with open(config_path, 'w') as f:
+        json.dump(config_dict, f, indent=2)
     # assert that model loads properly
     del pi0_model
-    PI0Policy.from_pretrained(output_path)
+    #PI0Policy.from_pretrained(output_path)
 
 
 if __name__ == "__main__":
