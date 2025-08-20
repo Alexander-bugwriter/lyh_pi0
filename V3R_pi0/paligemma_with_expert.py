@@ -175,7 +175,7 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
         if spatial_camera_config is None:
             self.spatial_camera_config = {
                 "base_0_rgb": True,        # 默认只有基础相机使用空间编码
-                "left_wrist_0_rgb": False,
+                "left_wrist_0_rgb": True,
                 "right_wrist_0_rgb": False,
             }
         else:
@@ -296,6 +296,22 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         if hasattr(self, 'fusion_block') and self.fusion_block is not None:
             for params in self.fusion_block.parameters():
                 params.requires_grad = True
+
+        if hasattr(self, 'spatial_tower') and self.spatial_tower is not None:
+            for param in self.spatial_tower.parameters():
+                param.requires_grad = False  # CUT3R完全冻结
+
+        # ✅ 新增组件：确保可训练
+        if hasattr(self, 'mm_projector') and self.mm_projector is not None:
+            for params in self.mm_projector.parameters():
+                params.requires_grad = True  # 投影器需要训练
+
+        if hasattr(self, 'fusion_block') and self.fusion_block is not None:
+            for params in self.fusion_block.parameters():
+                params.requires_grad = True  # 融合块需要训练
+
+        if hasattr(self, 'spatial_separator_token'):
+            self.spatial_separator_token.requires_grad = True  # 分隔符需要训练
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -455,8 +471,9 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 print(f"   ⚡ {camera_key} 仅使用当前帧")
         
             enhanced_features_list.append(final_features)
-        
-        return torch.stack(enhanced_features_list, dim=1)
+
+        return enhanced_features_list
+       # return torch.stack(enhanced_features_list, dim=1)
 
     def _encode_with_cut3r(self, image):
         """使用CUT3R进行空间编码 - CUT3R内部自动管理历史状态"""

@@ -53,7 +53,7 @@ class PI0Policy(PreTrainedPolicy):
             spatial_tower_select_feature="all",
             spatial_camera_config={
                 "base_0_rgb": True,        # 基础相机使用CUT3R空间编码
-                "left_wrist_0_rgb": False, # 手腕相机不使用空间编码
+                "left_wrist_0_rgb": True, # 手腕相机不使用空间编码
                 "right_wrist_0_rgb": False,
             },
             
@@ -420,8 +420,58 @@ class PI0FlowMatching(nn.Module):
         # img_emb = einops.rearrange(img_emb, "(b n) l d -> b (n l) d", b=bsize)
 
         # 🔥 关键修改：直接传递原始格式，不rearrange
-        img_emb = self.paligemma_with_expert.embed_image(images)  # 传入(b,n,c,h,w)
+        #img_emb = self.paligemma_with_expert.embed_image(images)  # 传入(b,n,c,h,w)
+        img_features_list = self.paligemma_with_expert.embed_image(images)
+    
+        # 找到最大长度
+        max_length = max(f.shape[1] for f in img_features_list)  # 比如513
+    
+        # 手动填充features
+        padded_features = []
+        updated_masks = []
+        IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+    
+        for i, features in enumerate(img_features_list):
+            camera_key = IMAGE_KEYS[i]
         
+            # features填充
+            if features.shape[1] < max_length:
+                pad_length = max_length - features.shape[1]
+                padding = torch.zeros(
+                    features.shape[0], pad_length, features.shape[2],
+                    dtype=features.dtype, device=features.device
+                )
+                padded_feature = torch.cat([features, padding], dim=1)
+            else:
+                padded_feature = features
+            padded_features.append(padded_feature)
+        
+            # mask处理 - 两步法
+            original_mask = img_masks[:, i]  # [batch, 256] 来自prepare_images
+        
+            # 第一步：拉升mask长度到max_length
+            # 如果原始是0就全0，如果原始是1就全1
+            if original_mask.any():
+                # camera存在 → 拉升为全1
+                stretched_mask = torch.ones(bsize, max_length, dtype=torch.bool, device=device)
+            else:
+                # camera丢失 → 拉升为全0
+                stretched_mask = torch.zeros(bsize, max_length, dtype=torch.bool, device=device)
+        
+            # 第二步：根据camera类型截断
+            if camera_key == "base_0_rgb":
+                # base camera：不操作（所有token都有效）
+                final_mask = stretched_mask
+            else:
+                # wrist camera：只保留前256个有效
+                final_mask = torch.zeros(bsize, max_length, dtype=torch.bool, device=device)
+                final_mask[:, :256] = stretched_mask[:, :256]  # 只有前256个保持原状态
+            
+            updated_masks.append(final_mask)
+
+        img_emb = torch.cat(padded_features, dim=1)  # [batch, total_tokens, features]
+        img_masks_updated = torch.cat(updated_masks, dim=1)  # [batch, total_tokens]
+            
         # 🔥 embed_image应该返回(b, n, l, d)格式
         if img_emb.dim() == 4:  # (b, n, l, d)
             num_patches_per_img = img_emb.shape[2]
