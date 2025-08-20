@@ -1,5 +1,20 @@
 import torch
 import os
+import draccus
+import time
+from draccus.parsers import encoding
+from enum import Enum
+
+# 定义枚举（从lerobot库复制）
+class NormalizationMode(Enum):
+    IDENTITY = "identity"
+    MEAN_STD = "mean_std" 
+    MIN_MAX = "min_max"
+
+# 注册枚举编码器
+@encoding.encode.register
+def encode_normalization_mode(obj: NormalizationMode, declared_type):
+    return obj.value
 
 # Monkey patch the device availability function before importing lerobot
 def patched_is_torch_device_available(device: str) -> bool:
@@ -69,5 +84,17 @@ observation = {
 
 # select action
 # let's assume the `action_dim` is 7
-action = policy.select_action(observation)[0, :, :7]
-print(action)
+start_time = time.perf_counter()
+action_0 = policy.select_action(observation)[0, :, :7]
+end_time = time.perf_counter()
+print(f"Action_0 selection time: {(end_time - start_time) * 1000:.2f} ms")
+print(action_0)
+
+start_time = time.perf_counter()
+action_1 = policy.select_action(observation)[0, :, :7]
+end_time = time.perf_counter()
+print(f"Action_1 selection time: {(end_time - start_time) * 1000:.2f} ms")
+print(action_1)
+
+
+

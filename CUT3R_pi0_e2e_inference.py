@@ -1,6 +1,7 @@
 import torch
 import os
 import sys
+import time
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
@@ -121,5 +122,14 @@ observation = {
 
 # select action
 # let's assume the `action_dim` is 7
-action = policy.select_action(observation)[0, :, :7]
-print(action)
+start_time = time.perf_counter()
+action_0 = policy.select_action(observation)[0, :, :7]
+end_time = time.perf_counter()
+print(f"Action_0 selection time: {(end_time - start_time) * 1000:.2f} ms")
+print(action_0)
+
+start_time = time.perf_counter()
+action_1 = policy.select_action(observation)[0, :, :7]
+end_time = time.perf_counter()
+print(f"Action_1 selection time: {(end_time - start_time) * 1000:.2f} ms")
+print(action_1)
