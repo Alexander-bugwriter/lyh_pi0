@@ -1,6 +1,7 @@
 import torch
 import os
 import sys
+import time
 os.environ['TORCH_USE_CUDA_DSA'] = '1'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
@@ -166,23 +167,17 @@ print("\n=== 执行Hi3R推理 ===")
 try:
     # 使用Hi3R进行动作选择
     # Hi3R会先进行全局轨迹规划，然后生成实时动作
-    with torch.no_grad():
-        # 让action_dim是7（例如7DOF机械臂）
-        action = policy.select_action(observation)[0, :, :7]
-        
-    print("Hi3R推理成功！")
-    print(f"输出动作形状: {action.shape}")
-    print(f"生成的动作序列:")
-    for i, step_action in enumerate(action):
-        print(f"  Step {i+1}: {step_action.cpu().numpy()}")
-        
-    # 额外信息
-    print(f"\n动作统计:")
-    print(f"  最大值: {action.max().item():.4f}")
-    print(f"  最小值: {action.min().item():.4f}")
-    print(f"  平均值: {action.mean().item():.4f}")
-    print(f"  标准差: {action.std().item():.4f}")
-    
+    start_time = time.perf_counter()
+    action_0 = policy.select_action(observation)[0, :, :7]
+    end_time = time.perf_counter()
+    print(f"Action_0 selection time: {(end_time - start_time) * 1000:.2f} ms")
+    print(action_0)
+
+    start_time = time.perf_counter()
+    action_1 = policy.select_action(observation)[0, :, :7]
+    end_time = time.perf_counter()
+    print(f"Action_1 selection time: {(end_time - start_time) * 1000:.2f} ms")
+    print(action_1) 
 except Exception as e:
     print(f"推理失败: {e}")
     import traceback
