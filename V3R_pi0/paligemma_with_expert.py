@@ -252,6 +252,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             self.spatial_separator_token = nn.Parameter(
                 torch.randn(1, config.paligemma_config.projection_dim) * embed_std
             )
+            self._load_modular_components()
         else:
             self.spatial_tower = None
             self.spatial_projector = None
@@ -263,7 +264,68 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         else:
             self.history_buffer = None
 
+    def _load_modular_components(self):
+        """模块化加载训练好的组件"""
+        
+        # 使用spatial_encoder_checkpoint目录
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.abspath(os.path.join(script_dir, '..'))
+        base_path = Path(project_root) / 'spatial_encoder_checkpoint'
+        
+        modules_config = {
+            'fusion_block': {
+                'path': base_path / 'fusion_block.pth',
+                'component': self.fusion_block,
+                'name': '融合模块'
+            },
+            'mm_projector': {
+                'path': base_path / 'mm_projector.pth', 
+                'component': self.mm_projector,
+                'name': '投影模块'
+            },
+            'spatial_separator_token': {
+                'path': base_path / 'spatial_separator_token.pth',
+                'component': self.spatial_separator_token,
+                'name': '分隔符参数'
+            }
+        }
+        
+        for module_name, config in modules_config.items():
+            if config['path'].exists():
+                try:
+                    if hasattr(config['component'], 'load_state_dict'):
+                        # 标准模块加载
+                        state_dict = torch.load(config['path'], map_location='cpu')
+                        config['component'].load_state_dict(state_dict)
+                        print(f"✅ 加载{config['name']}: {config['path']}")
+                    else:
+                        # 单个参数加载
+                        param_data = torch.load(config['path'], map_location='cpu')
+                        config['component'].data = param_data
+                        print(f"✅ 加载{config['name']}: {config['path']}")
+                except Exception as e:
+                    print(f"⚠️ 加载{config['name']}失败: {e}，使用随机初始化")
+            else:
+                print(f"📝 {config['name']}不存在，使用随机初始化")
 
+    def save_modular_components(self, save_path=None):
+        """保存训练好的模块组件"""
+        if save_path is None:
+            # 🔥 默认保存到spatial_encoder_checkpoint
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(script_dir, '..'))
+            save_path = Path(project_root) / 'spatial_encoder_checkpoint'
+        else:
+            save_path = Path(save_path)
+        
+        save_path.mkdir(parents=True, exist_ok=True)
+        
+        # 保存各模块
+        torch.save(self.fusion_block.state_dict(), save_path / 'fusion_block.pth')
+        torch.save(self.mm_projector.state_dict(), save_path / 'mm_projector.pth') 
+        torch.save(self.spatial_separator_token.data, save_path / 'spatial_separator_token.pth')
+        
+        print(f"💾 模块组件保存完成: {save_path}")
     
     # def _build_spatial_tower(self, config):
     #     """根据配置构建空间编码器"""
@@ -274,7 +336,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
     #     else:
     #         raise ValueError(f"Unsupported spatial encoder: {config.spatial_encoder_type}")
 
-
+    
     def set_requires_grad(self):
         """sets the requires_grad attribute of the model parameters based on the configuration.
         If `freeze_vision_encoder` is True, the vision tower parameters are frozen.
@@ -359,54 +421,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         # 检查是否有特殊的单图像处理方法
         single_image_methods = [m for m in dir(self.spatial_tower) if 'single' in m.lower() or 'image' in m.lower()]
         print(f"可能的单图像方法: {single_image_methods}")
-    # def embed_image(self, image: torch.Tensor, camera_params=None):
-    #     """
-    #     🔥 VLM3R风格的空间增强图像编码 + 历史特征
-
-    #     Args:
-    #         image: (B, C, H, W) 输入图像，224x224
-    #         camera_params: 相机参数 (可选)
-
-    #     Returns:
-    #         final_features: (B, L, D) 增强后的特征
-    #     """
-
-    #     # 1. 获取PaliGemma基础视觉特征
-    #     # base_features = self.paligemma.get_image_features(image)  # (B, L, D)
-
-    #     # 🔥 关键修改：获取原始SigLIP特征 (未投影的1152维)
-    #     vision_outputs = self.paligemma.vision_tower(image)  # 返回BaseModelOutputWithPooling对象
-    #     raw_vision_features = vision_outputs.last_hidden_state  # (B, L, 1152) 提取实际的tensor
-        
-    #     # 空间特征增强 + 投影 (一次性完成)
-    #     if self.config.use_spatial_encoder and self.spatial_tower is not None:
-    #         # 获取空间特征
-    #         spatial_features = self._preprocess_spatial_features(image)
-            
-    #         # 🔥 融合+投影都在内部完成，返回最终的2048维特征
-    #         enhanced_features = self._encode_images_like_vlm3r(raw_vision_features, spatial_features)
-    #     else:
-    #         # 如果没有空间编码器，使用PaliGemma原生投影
-    #         enhanced_features = self.paligemma.multi_modal_projector(raw_vision_features)
-    #     # if self.mm_projector is not None:
-    #     #     print("使用VLM3R的投影模块")
-    #     #     enhanced_features = self.mm_projector(enhanced_features)
-    #     # else:
-    #     #     # 如果没有空间编码器，使用PaliGemma原生投影
-    #     #     print("使用PaliGemma原生投影")
-    #     #     enhanced_features = self.paligemma.multi_modal_projector(base_features)
-        
-    #     # 3. 🔥 历史特征增强 (保持你的创新功能)
-    #     final_features = enhanced_features
-    #     if self.config.use_history_features and self.history_buffer is not None:
-    #         # 使用新的带分隔符的方法
-    #         final_features = self.history_buffer.get_enhanced_features_with_separators(
-    #             current_features=enhanced_features
-    #         )
-
-    #         # 存储当前帧到历史缓存（拼接分隔符）
-    #         self.history_buffer.append(enhanced_features, self.spatial_separator_token)
-    #     return final_features
+    
 
     def embed_image(self, image: torch.Tensor):
         """
