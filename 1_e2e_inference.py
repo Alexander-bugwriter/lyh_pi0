@@ -50,7 +50,7 @@ from lerobot.common.policies.pi0.configuration_pi0 import PI0Config
 # from V3R_pi0 import PI0FASTPolicy, PI0Policy
 
 PATH_TO_PI_MODEL = (
-    "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_base"
+    "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_libero"
 )
 PATH_TO_PI_FAST_MODEL = (
     "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_fast_base"

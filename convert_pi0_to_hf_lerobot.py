@@ -62,12 +62,36 @@ from conversion_scripts.conversion_utils import (
 from pi0.modeling_pi0 import PI0Policy
 import json
 import os
+
+import draccus
+from enum import Enum
+from draccus.parsers import encoding
+from safetensors.torch import save_file,save_model
+# 定义NormalizationMode枚举（从lerobot库复制）
+class NormalizationMode(Enum):
+    IDENTITY = "identity"
+    MEAN_STD = "mean_std" 
+    MIN_MAX = "min_max"
+
+# 注册枚举编码器
+@draccus.encode.register(NormalizationMode)
+def encode_normalization_mode(obj: NormalizationMode, declared_type):
+    return obj.value
+@draccus.encode.register(Enum)
+def encode_enum_fallback(obj, declared_type):
+    """处理所有枚举类型的序列化"""
+    if hasattr(obj, 'value'):
+        return obj.value
+    elif hasattr(obj, 'name'):
+        return obj.name
+    else:
+        return str(obj)
+
 PRECISIONS = {
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
     "float16": torch.float16,
 }
-
 
 def slice_paligemma_state_dict(state_dict, config):
     suffix = "/value" if "img/embedding/kernel/value" in state_dict else ""
@@ -328,6 +352,7 @@ def convert_pi0_checkpoint(
     output_path: str,
     torch_device: str,
 ):
+    print("Registering enum encoders...")
     # Break down orbax ckpts - they are in OCDBT
     initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir)
     # process projection params
@@ -408,7 +433,9 @@ def convert_pi0_checkpoint(
     # pi0_tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
     os.makedirs(output_path, exist_ok=True)
     
-    pi0_model.save_pretrained(output_path, safe_serialization=True)
+    # pi0_model.save_pretrained(output_path, safe_serialization=True)
+    # save_file(pi0_model.state_dict(), os.path.join(output_path, "model.safetensors"))
+    save_model(pi0_model, os.path.join(output_path, "model.safetensors"))
     # pi0_tokenizer.save_pretrained(output_path, dtype=torch_dtype)
     config_dict = pi0_config.__dict__.copy()
     config_dict['type'] = 'pi0'  # 添加 draccus 需要的 type 字段
