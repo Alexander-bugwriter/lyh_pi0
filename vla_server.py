@@ -14,14 +14,31 @@ from websocket_tool.websocket_server_tool import (
     wait_for_client_connection
 )
 import argparse
+from pathlib import Path
+import json
 
 # 设置环境变量
 os.environ["LEROBOT_DEVICE"] = "cuda" if torch.cuda.is_available() else "cpu"
 
 # 模型路径配置
-PATH_TO_PI_MODEL = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_base"
+PATH_TO_PI_MODEL = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_libero"
 PATH_TO_PI_FAST_MODEL = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_fast_base"
+PATH_TO_JAX_PI_MODEL = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/jax/pi0_libero/pi0_libero"  # 归一化参数路径
+def load_normalization_stats():
+    """加载归一化参数"""
+    norm_stats_path = Path(PATH_TO_JAX_PI_MODEL) / "assets/physical-intelligence/libero/norm_stats.json"
 
+    if not norm_stats_path.exists():
+        print(f"⚠️  警告: 归一化参数文件不存在: {norm_stats_path}")
+    with open(norm_stats_path) as f:
+        norm_stats = json.load(f)
+
+    return {
+        'state_mean': np.array(norm_stats["norm_stats"]["state"]["mean"][:8], dtype=np.float32),
+        'state_std': np.array(norm_stats["norm_stats"]["state"]["std"][:8], dtype=np.float32),
+        'action_mean': np.array(norm_stats["norm_stats"]["actions"]["mean"][:7], dtype=np.float32),
+        'action_std': np.array(norm_stats["norm_stats"]["actions"]["std"][:7], dtype=np.float32)
+    }
 def setup_device_patch():
     """修复设备检测函数"""
     def patched_is_torch_device_available(device: str) -> bool:
@@ -64,7 +81,7 @@ def load_model(model_type="pi0"):
         print(f"❌ 模型加载失败: {e}")
         raise
 
-def convert_observation(raw_data: dict, device) -> dict:
+def convert_observation(raw_data: dict, device, norm_stats) -> dict:
     """
     转换原始数据为模型期望的格式
     输入: {"observation/image": np.array, "observation/state": np.array, "prompt": str, "reset": bool}
@@ -94,7 +111,8 @@ def convert_observation(raw_data: dict, device) -> dict:
     if "observation/state" in raw_data:
         state = raw_data["observation/state"]
         if isinstance(state, np.ndarray):
-            state_tensor = torch.from_numpy(state.copy()).unsqueeze(0)
+            normalized_state = (state - norm_stats['state_mean']) / (norm_stats['state_std'] + 1e-6)
+            state_tensor = torch.from_numpy(normalized_state.copy()).unsqueeze(0)
             observation["state"] = state_tensor.to(dtype=torch.float32, device=device)
     
     # 处理prompt
@@ -104,13 +122,31 @@ def convert_observation(raw_data: dict, device) -> dict:
     
     return observation
 
+def denormalize_action(action, norm_stats, current_state):
+    """动作反归一化"""
+    # action: [batch, time, 7] 的tensor
+    # current_state: [8] 的numpy array (未归一化的状态)
+    
+    if hasattr(action, 'cpu'):
+        action_np = action.cpu().numpy()
+    else:
+        action_np = np.array(action)
+
+    # 反归一化动作
+    denorm_action = action_np * (norm_stats['action_std'] + 1e-6) + norm_stats['action_mean']
+        
+    # 增量控制：前6维加上当前状态的前6维
+    denorm_action[:, :6] += current_state[None, :6]
+
+    return denorm_action
+
 def run_server(host="0.0.0.0", port=8000, model_type="pi0"):
     """运行VLA推理服务器"""
     
     # 加载模型
     policy = load_model(model_type)
     device = policy.config.device
-    
+    norm_stats = load_normalization_stats()
     # 启动WebSocket服务器
     print(f"启动服务器 {host}:{port}")
     start_websocket_server(host=host, port=port, device=device)
@@ -139,17 +175,18 @@ def run_server(host="0.0.0.0", port=8000, model_type="pi0"):
                 # policy.reset() if hasattr(policy, 'reset') else None
             
             step_count += 1
-            
+            raw_state = raw_data.get("observation/state", np.zeros(8))
             # 转换数据格式
-            observation = convert_observation(raw_data, device)
+            observation = convert_observation(raw_data, device, norm_stats)
             
             # 执行推理
             start_time = time.perf_counter()
             action = policy.select_action(observation)[0, :, :7]  # 取前7个动作维度
             end_time = time.perf_counter()
-            
+            denormalized_action = denormalize_action(action, norm_stats, raw_state)
             # 发送动作响应
-            send_action_response(action)
+           # send_action_response(action)
+            send_action_response(denormalized_action)
             
             # 日志输出
             inference_time = (end_time - start_time) * 1000

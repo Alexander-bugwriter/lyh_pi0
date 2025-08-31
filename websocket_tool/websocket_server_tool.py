@@ -12,7 +12,7 @@ import time
 import sys
 import os
 import logging
-
+import numpy as np
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
@@ -65,9 +65,12 @@ class SimpleForwardServer:
                         actions_np = response.detach().cpu().numpy()
                         if len(actions_np.shape) == 1:
                             actions_np = actions_np.reshape(1, -1)
-                        formatted_response = {"actions": actions_np.tolist()}
+                        formatted_response = {"actions": actions_np}
                     else:
-                        formatted_response = response
+                        if isinstance(response, np.ndarray):
+                            formatted_response = {"actions": response}
+                        else:
+                            formatted_response = response
                     
                     await websocket.send(msgpack_numpy.packb(formatted_response))
                     logger.info("已发送动作响应")
