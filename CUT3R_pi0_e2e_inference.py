@@ -88,7 +88,8 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # 使用GPU 1
 from V3R_pi0 import PI0Policy
 
 PATH_TO_PI_MODEL = (
-    "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_base"
+    #"/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/pi0_base"
+    "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/pytorch/CUT3R_pi0_test"
 )
 model_type = "pi0"  # or "pi0fast"
 

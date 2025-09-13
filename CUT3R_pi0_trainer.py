@@ -38,7 +38,7 @@ def patched_is_torch_device_available(device: str) -> bool:
 # 应用Monkey Patch
 import lerobot.common.utils.utils
 lerobot.common.utils.utils.is_torch_device_available = patched_is_torch_device_available
-print("✅ 设备检查函数已修复")
+print("设备检查函数已修复")
 
 
 
@@ -51,28 +51,32 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, Dataset
 from pathlib import Path
 from torchvision.transforms.v2 import Compose, Resize
-
+from safetensors.torch import save_file,save_model
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.configs.policies import PreTrainedConfig
 from V3R_pi0.modeling_pi0 import PI0Policy
 from utils.normalizers import Normalizer
-
+from utils.dataset_config import get_dataset_info, generate_delta_timestamps
 
 class LerobotPI0Dataset(Dataset):
     """标准Lerobot格式数据集包装器"""
     
-    def __init__(self, repo_id=None, root=None, image_size=224, action_horizon=50):
+    def __init__(self, repo_id=None, root=None, image_size=224, action_horizon=50,dataset_fps=10.0,debug_episodes=None):
         print(f"加载Lerobot数据集: {repo_id}")
-        
+        episodes=None
+        if debug_episodes:
+            episodes = list(range(debug_episodes))
+            print(f"调试模式：只加载前 {debug_episodes} 个episodes")
         image_transforms = Resize((image_size, image_size))
-        
+        info = get_dataset_info(root)
+        delta_timestamps = generate_delta_timestamps(info['fps'], info['features'], action_horizon) 
         # 标准lerobot格式的时间戳配置
-        delta_timestamps = {
-            "observation.images.base": [0],
-            "observation.images.wrist": [0], 
-            "observation.state": [0],
-            "action": [i / 30 for i in range(action_horizon)],
-        }
+        #delta_timestamps = {
+        #    "observation.images.base": [0],
+        #    "observation.images.wrist": [0], 
+        #    "observation.state": [0],
+        #    "action": [i / dataset.fps for i in range(action_horizon)],
+        #    }
         
         try:
             self.dataset = LeRobotDataset(
@@ -80,26 +84,46 @@ class LerobotPI0Dataset(Dataset):
                 root=root,
                 image_transforms=image_transforms,
                 delta_timestamps=delta_timestamps,
+                episodes=episodes
             )
-            print(f" 数据集加载成功，共 {len(self.dataset)} 条数据")
+            print(f"数据集加载成功，共 {len(self.dataset)} 条数据")
             
         except Exception as e:
-            print(f"   数据集加载失败: {e}")
+            print(f"数据集加载失败: {e}")
             
             # 调试信息：检查本地路径结构
             if root and os.path.exists(root):
-                print(f"    调试：检查本地路径结构")
-                self._debug_local_path_structure(root)
-            raise
+                print(f"检查本地路径结构:")
+                try:
+                    # 检查关键文件
+                    key_paths = [
+                        os.path.join(root, "meta", "info.json"),
+                        os.path.join(root, "meta", "stats.json"),
+                        os.path.join(root, "data")
+                    ]
+                    for key_path in key_paths:
+                        if os.path.exists(key_path):
+                            print(f" {os.path.relpath(key_path, root)}")
+                        else:
+                            print(f" {os.path.relpath(key_path, root)}")
+                            
+                    # 检查data目录内容
+                    data_dir = os.path.join(root, "data")
+                    if os.path.exists(data_dir):
+                        chunks = [d for d in os.listdir(data_dir) if d.startswith("chunk-")]
+                        print(f"发现 {len(chunks)} 个chunk目录")
+                        
+                except Exception as debug_e:
+                    print(f"调试失败: {debug_e}")
         
         # 标准化器配置
         self.normalizer = Normalizer(
             norm_stats=self.dataset.meta.stats,
             norm_type={
-                "observation.images.base": "identity",
-                "observation.images.wrist": "identity", 
-                "observation.state": "meanstd",
-                "action": "meanstd",
+                "image": "identity",
+                "wrist_image": "identity", 
+                "state": "meanstd",
+                "actions": "meanstd",
             }
         )
 
@@ -109,19 +133,26 @@ class LerobotPI0Dataset(Dataset):
     
     def __getitem__(self, idx):
         item = self.dataset[idx]
+        #print(f"Original dataset keys: {list(item.keys())}")
         normalized_item = self.normalizer.normalize(item)
         
         # 图像处理
         images = {}
         
         # 基础相机 (必需)
-        if "observation.images.base" in normalized_item:
-            base_image = (normalized_item["observation.images.base"] * 255).to(torch.uint8)
+        if "image" in normalized_item:
+            base_image = normalized_item["image"]
+            while base_image.dim() > 3 and 1 in base_image.shape:
+                base_image = base_image.squeeze()
+            base_image = (base_image * 255).to(torch.uint8)
             images["base_0_rgb"] = base_image
         
         # 手腕相机 (可选)
-        if "observation.images.wrist" in normalized_item:
-            wrist_image = (normalized_item["observation.images.wrist"] * 255).to(torch.uint8)
+        if "wrist_image" in normalized_item:
+            wrist_image = normalized_item["wrist_image"]
+            while wrist_image.dim() > 3 and 1 in wrist_image.shape:
+                wrist_image = wrist_image.squeeze()
+            wrist_image = (wrist_image * 255).to(torch.uint8)
             images["left_wrist_0_rgb"] = wrist_image
         
         # 任务指令
@@ -129,16 +160,17 @@ class LerobotPI0Dataset(Dataset):
         if isinstance(task_text, str):
             prompt = [task_text]
         elif isinstance(task_text, (list, tuple)):
-            prompt = task_text
+            #prompt = task_text
+            prompt = [str(t) for t in task_text]  # 确保每个元素都是字符串
         else:
             prompt = [str(task_text)]
-        
+        #print(f"prompt type and content: {type(prompt)}, {prompt}") 
         return {
             "image": images,
-            "state": normalized_item["observation.state"][0],
-            "action": normalized_item["action"],
+            "state": normalized_item["state"][0],
+            "action": normalized_item["actions"],
             "action_is_pad": normalized_item.get("action_is_pad", 
-                torch.zeros_like(normalized_item["action"][..., 0], dtype=torch.bool)
+                torch.zeros_like(normalized_item["actions"][..., 0], dtype=torch.bool)
             ),
             "prompt": prompt,
         }
@@ -226,7 +258,7 @@ class CUT3R_pi0_Trainer(L.LightningModule):
         
         language_model = self.policy.model.paligemma_with_expert.paligemma.language_model
         
-        # ������ 修复：更严格的LoRA检查
+        # 修复：更严格的LoRA检查
         if (hasattr(language_model, 'peft_config') and 
             language_model.peft_config is not None and 
             len(language_model.peft_config) > 0):
@@ -261,16 +293,21 @@ class CUT3R_pi0_Trainer(L.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """训练步骤"""
+        #print(f"batch prompt: {batch['prompt']}")
         loss, loss_dict = self.policy(batch)
         
         # 记录损失
         self.log('train_loss', loss, prog_bar=True, sync_dist=True)
         
-        # 记录详细损失
         for key, value in loss_dict.items():
-            if isinstance(value, (int, float, torch.Tensor)):
+            if isinstance(value, (int, float)):
                 self.log(f'train_{key}', value, sync_dist=True)
-        
+            elif isinstance(value, torch.Tensor):
+            # 修复：对tensor取均值转为标量
+                if value.numel() == 1:
+                    self.log(f'train_{key}', value.item(), sync_dist=True)
+                else:
+                    self.log(f'train_{key}', value.mean().item(), sync_dist=True)
         return loss
     
     def configure_optimizers(self):
@@ -287,7 +324,7 @@ class CUT3R_pi0_Trainer(L.LightningModule):
             eps=1e-6
         )
         
-        # ������ 修复：使用更合适的学习率调度器
+        # 修复：使用更合适的学习率调度器
         total_steps = self.trainer.estimated_stepping_batches
         warmup_steps = int(0.05 * total_steps)  # 5% warmup
         
@@ -316,17 +353,75 @@ class CUT3R_pi0_Trainer(L.LightningModule):
         
         print(f" 保存模型到: {save_dir}")
         
-        # ������ 1. 保存主干模型（和原版Pi0格式完全一致）
+        # 1. 保存主干模型（和原版Pi0格式完全一致）
         print("   保存主干模型（PaliGemma + LoRA + Action Expert）...")
-        self.policy.save_pretrained(save_dir)
-        print(f"      config.json")
-        print(f"      model.safetensors（主干+Action Expert）")
+        #self.policy.save_pretrained(save_dir)
+        try:
+        # 直接保存模型权重
+            save_model(self.policy, save_dir / "model.safetensors")
+            print(f"     成功保存 model.safetensors（主干+Action Expert）")
+        except Exception as e:
+            print(f"      model.safetensors保存失败: {e}")
+        print(f"      保存主干模型config.json")
+        config_dict = self.policy.config.__dict__.copy()
+        config_dict['type'] = 'pi0'  # draccus需要的type字段
+
+        # 清理不需要的字段
+        if 'pretrained_path' in config_dict:
+            del config_dict['pretrained_path']
+
+        # 保存JSON配置
+        with open(save_dir / 'config.json', 'w') as f:
+            json.dump(config_dict, f, indent=2)
+
+        print(f"成功保存 model.safetensors（主干+Action Expert）与主干模型config")
         
-        # ������ 2. 保存融合模块到final/目录（便于手动移动）
+        # 2. 保存融合模块到final/目录（便于手动移动）
         print(f"  保存融合模块到final/目录...")
-        
+        print("   保存CUT3R增强配置...")
         paligemma_model = self.policy.model.paligemma_with_expert
+        paligemma_config = paligemma_model.config
+    
+        cut3r_config = {
+            # === 空间编码器核心配置 ===
+            "use_spatial_encoder": getattr(paligemma_config, 'use_spatial_encoder', True),
+            "spatial_tower": getattr(paligemma_config, 'spatial_tower', 'cut3r'),
+            "spatial_tower_select_feature": getattr(paligemma_config, 'spatial_tower_select_feature', 'all'),
         
+            # === 相机级别的空间编码配置 ===
+            "spatial_camera_config": getattr(paligemma_config, 'spatial_camera_config', {
+                "base_0_rgb": True,
+                "left_wrist_0_rgb": True,
+                "right_wrist_0_rgb": False,
+            }),
+        
+            # === 历史特征配置 ===
+            "use_history_features": getattr(paligemma_config, 'use_history_features', True),
+            "num_sampled_history_frames": getattr(paligemma_config, 'num_sampled_history_frames', 5),
+            "history_sampling_method": getattr(paligemma_config, 'history_sampling_method', 'uniform'),
+            "history_camera_config": getattr(paligemma_config, 'history_camera_config', {
+                "base_0_rgb": True,
+                "left_wrist_0_rgb": False,
+                "right_wrist_0_rgb": False,
+            }),
+        
+            # === 投影器配置 ===
+            "mm_projector_type": getattr(paligemma_config, 'mm_projector_type', 'mlp2x_gelu'),
+            "mm_hidden_size": getattr(paligemma_config, 'mm_hidden_size', 768),
+        
+            # === 融合块配置 ===
+            "fusion_block": getattr(paligemma_config, 'fusion_block', 'cross_attention'),
+        
+            # === 训练相关 ===
+            "training_stage": self.training_stage,
+            "enhanced_pi0_version": "1.0",
+            "spatial_encoder": "cut3r",
+        }   
+    
+        # 保存CUT3R配置
+        with open(save_dir / "cut3r_config.json", "w") as f:
+            json.dump(cut3r_config, f, indent=2)
+        print(f"成功保存cut3r_config.json")
         # 保存融合相关模块
         modules_config = [
             ('fusion_block', 'fusion_block.pth', paligemma_model.fusion_block),
@@ -348,7 +443,7 @@ class CUT3R_pi0_Trainer(L.LightningModule):
                 except Exception as e:
                     print(f"      {file_name} 保存失败: {e}")
         
-        # ������ 3. 保存训练元信息和部署说明
+        # 3. 保存训练元信息和部署说明
         training_info = {
             "training_stage": self.training_stage,
             "enhanced_pi0_version": "1.0",
@@ -368,62 +463,10 @@ class CUT3R_pi0_Trainer(L.LightningModule):
         with open(save_dir / "training_info.json", "w") as f:
             json.dump(training_info, f, indent=2)
         
-        #  4. 生成部署脚本
-        deploy_script = f'''#!/bin/bash
-# Enhanced Pi0 模块部署脚本
-# 执行此脚本将融合模块移动到正确位置
-
-echo " 开始部署Enhanced Pi0融合模块..."
-
-# 创建目标目录
-mkdir -p spatial_encoder_checkpoint
-
-# 移动融合模块文件
-'''
-        
-        for module_file in saved_modules:
-            deploy_script += f'''
-if [ -f "{save_dir}/{module_file}" ]; then
-    cp "{save_dir}/{module_file}" spatial_encoder_checkpoint/
-    echo "✅ 已复制 {module_file}"
-else
-    echo "❌ 未找到 {module_file}"
-fi'''
-        
-        deploy_script += '''
-
-echo " 融合模块已部署到: spatial_encoder_checkpoint/"
-echo " 现在可以使用以下代码加载模型:"
-echo ""
-echo "from V3R_pi0.modeling_pi0 import PI0Policy"
-echo f"policy = PI0Policy.from_pretrained('{save_dir}')"
-echo ""
-echo "✅ 部署完成！"
-'''
-        
-        with open(save_dir / "deploy_modules.sh", "w") as f:
-            f.write(deploy_script)
-        
-        # 设置脚本执行权限
-        import stat
-        (save_dir / "deploy_modules.sh").chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IROTH)
-        
         print(f"")
         print(f" 模型保存完成！")
         print(f"    主干模型: {save_dir}")
         print(f"    融合模块: {save_dir}")
-        print(f"")
-        print(f" 下一步操作:")
-        print(f"   1. 手动移动融合模块到目标位置:")
-        for module_file in saved_modules:
-            print(f"      cp {save_dir}/{module_file} spatial_encoder_checkpoint/")
-        print(f"")
-        print(f"   2. 或者执行自动部署脚本:")
-        print(f"      bash {save_dir}/deploy_modules.sh")
-        print(f"")
-        print(f"   3. 部署完成后加载模型:")
-        print(f"      PI0Policy.from_pretrained('{save_dir}')")
-        
         return save_dir
 
 
@@ -455,14 +498,14 @@ def load_stage1_checkpoint(policy, checkpoint_dir):
         
     print(f" 加载阶段1检查点: {checkpoint_dir}")
     
-    # ������ 1. 检查主干模型是否存在
+    # 1. 检查主干模型是否存在
     has_main_model = (
         (checkpoint_dir / "config.json").exists() and 
         ((checkpoint_dir / "model.safetensors").exists() or 
          (checkpoint_dir / "pytorch_model.bin").exists())
     )
     
-    # ������ 2. 检查final/目录下的融合模块文件
+    # 2. 检查final/目录下的融合模块文件
     fusion_files = ['fusion_block.pth', 'mm_projector.pth', 'spatial_separator_token.pth']
     final_fusion_files = [f for f in fusion_files if (checkpoint_dir / f).exists()]
     
@@ -481,7 +524,7 @@ def load_stage1_checkpoint(policy, checkpoint_dir):
         print(" 发现主干模型，假设融合模块已在spatial_encoder_checkpoint/")
         return True
     
-    # ������ 3. 备用：检查spatial_encoder_checkpoint目录
+    #  3. 备用：检查spatial_encoder_checkpoint目录
     script_dir = Path(__file__).parent if '__file__' in globals() else Path.cwd()
     project_root = script_dir.parent
     default_spatial_dir = project_root / 'spatial_encoder_checkpoint'
@@ -507,6 +550,17 @@ def load_stage1_checkpoint(policy, checkpoint_dir):
     
     return False
 
+def collate_fn(batch):
+    """自定义批处理函数，正确处理 prompt 字段"""
+    result = {}
+    for key in batch[0].keys():
+        if key == "prompt":
+            # 保持 prompt 为字符串列表的列表
+            result[key] = [item[key][0] for item in batch]
+        else:
+            # 其他字段使用默认处理
+            result[key] = torch.utils.data.dataloader.default_collate([item[key] for item in batch])
+    return result
 
 def train_single_stage(args, stage):
     """训练单个阶段"""
@@ -517,7 +571,7 @@ def train_single_stage(args, stage):
     # 加载模型
     print(" 加载模型...")
     config = PreTrainedConfig.from_pretrained(args.base_model_path)
-    # ������ 修复：移除手动设备设置，让Lightning管理
+    # 修复：移除手动设备设置，让Lightning管理
     # config.device = "cpu"  # 删除这行！
     config.freeze_vision_encoder = True
     config.train_expert_only = True
@@ -543,7 +597,9 @@ def train_single_stage(args, stage):
         repo_id=args.data_repo_id,
         root=args.data_root,
         image_size=224,
-        action_horizon=50
+        action_horizon=50,
+        dataset_fps=10.0,
+        debug_episodes=args.debug_episodes,
     )
     
     dataloader = DataLoader(
@@ -551,7 +607,9 @@ def train_single_stage(args, stage):
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        persistent_workers=True if args.num_workers > 0 else False
+        persistent_workers=True if args.num_workers > 0 else False,
+        pin_memory=True,
+        collate_fn=collate_fn,  # 添加这行
     )
     
     # 设置保存目录
@@ -612,7 +670,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./checkpoints/enhanced_pi0",
                        help="输出目录")
     
-    # ������ 新增：支持自动两阶段训练
+    #  新增：支持自动两阶段训练
     parser.add_argument("--auto_two_stage", action="store_true", 
                        help="自动执行两阶段训练")
     parser.add_argument("--stage", type=int, choices=[1, 2], default=None,
@@ -635,17 +693,18 @@ def main():
                        help="数据加载器工作进程数")
     parser.add_argument("--devices", type=int, default=1,
                        help="GPU设备数量")
-    parser.add_argument("--precision", type=str, default="bf16-mixed",
+    parser.add_argument("--precision", type=str, default="16",
                        help="训练精度")
     parser.add_argument("--accumulate_grad_batches", type=int, default=2,
                        help="梯度累积批次数")
     parser.add_argument("--save_every_n_epochs", type=int, default=4,
                        help="每N个epoch保存一次")
-    
+    parser.add_argument("--debug_episodes", type=int, default=None, help="限制样本数量用于调试")
     args = parser.parse_args()
-    
+    if args.data_repo_id == "None":
+        args.data_repo_id = None
     if args.auto_two_stage:
-        # ������ 自动两阶段训练
+        # 自动两阶段训练
         print(" 启动自动两阶段训练模式")
         
         # 阶段1

@@ -179,8 +179,10 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                 "left_wrist_0_rgb": True,
                 "right_wrist_0_rgb": False,
             }
+            print("spatial camera config:",self.spatial_camera_config)
         else:
             self.spatial_camera_config = spatial_camera_config
+            print("spatial camera config:",self.spatial_camera_config)
 
         # 🔥 历史特征相机配置
         if history_camera_config is None:
@@ -189,8 +191,10 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
                 "left_wrist_0_rgb": False,
                 "right_wrist_0_rgb": False,
             }
+            print("history camera config:",self.history_camera_config)
         else:
             self.history_camera_config = history_camera_config
+            print("history camera config:",self.history_camera_config)
 
         super().__init__(**kwargs)
     def __post_init__(self):
@@ -270,8 +274,8 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         
         # 使用spatial_encoder_checkpoint目录
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.abspath(os.path.join(script_dir, '..'))
-        base_path = Path(project_root) / 'spatial_encoder_checkpoint'
+        #project_root = os.path.abspath(os.path.join(script_dir, '..'))
+        base_path = Path(script_dir) / 'spatial_encoder_checkpoint'
         
         modules_config = {
             'fusion_block': {
@@ -298,16 +302,16 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                         # 标准模块加载
                         state_dict = torch.load(config['path'], map_location='cpu')
                         config['component'].load_state_dict(state_dict)
-                        print(f"✅ 加载{config['name']}: {config['path']}")
+                        print(f"加载{config['name']}: {config['path']}")
                     else:
                         # 单个参数加载
                         param_data = torch.load(config['path'], map_location='cpu')
                         config['component'].data = param_data
-                        print(f"✅ 加载{config['name']}: {config['path']}")
+                        print(f"加载{config['name']}: {config['path']}")
                 except Exception as e:
-                    print(f"⚠️ 加载{config['name']}失败: {e}，使用随机初始化")
+                    print(f"加载{config['name']}失败: {e}，使用随机初始化")
             else:
-                print(f"📝 {config['name']}不存在，使用随机初始化")
+                print(f"{config['name']}不存在，使用随机初始化")
 
     def save_modular_components(self, save_path=None):
         """保存训练好的模块组件"""
@@ -440,7 +444,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         enhanced_features_list = []
         
         for img_idx in range(num_images):
-            print("embed_image里的图像尺寸：", image[:, img_idx].shape)
+            #print("embed_image里的图像尺寸：", image[:, img_idx].shape)
             current_img = image[:, img_idx]  # (B, C, H, W)
             camera_key = IMAGE_KEYS[img_idx] if img_idx < len(IMAGE_KEYS) else f"camera_{img_idx}"
             
@@ -460,11 +464,11 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             if needs_spatial:
                 # 🔥 使用CUT3R空间编码（CUT3R内部自动管理历史状态）
                 enhanced_features = self._encode_with_cut3r(current_img)
-                print(f"✅ {camera_key}: 使用CUT3R空间编码")
+                #print(f"✅ {camera_key}: 使用CUT3R空间编码")
             else:
                 # 标准PaliGemma处理
                 enhanced_features = self.paligemma.get_image_features(current_img)
-                print(f"📷 {camera_key}: 使用标准PaliGemma")
+                #print(f"📷 {camera_key}: 使用标准PaliGemma")
             
             # # 🔥 历史特征处理（如果配置启用）
             # if self.config.use_history_features and self.history_buffer is not None:
@@ -481,10 +485,10 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                     current_features=enhanced_features
                 )
                 self.history_buffer.append(enhanced_features, self.spatial_separator_token)
-                print(f"   📁 {camera_key} 启用历史特征增强")
+                #print(f"   📁 {camera_key} 启用历史特征增强")
             else:
                 final_features = enhanced_features
-                print(f"   ⚡ {camera_key} 仅使用当前帧")
+                #print(f"   ⚡ {camera_key} 仅使用当前帧")
         
             enhanced_features_list.append(final_features)
 
@@ -494,14 +498,17 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
     def _encode_with_cut3r(self, image):
         """使用CUT3R进行空间编码 - CUT3R内部自动管理历史状态"""
         # 1. 获取SigLIP原始特征
-        print("encoder_with_cut3r函数里图像形状：", image.shape)
+        #print("encoder_with_cut3r函数里图像形状：", image.shape)
         # image = image.unsqueeze(0)
         vision_outputs = self.paligemma.vision_tower(image)
         raw_vision_features = vision_outputs.last_hidden_state  # (B, L, 1152)
         
         # 2. 🔥 关键：直接调用CUT3R，它内部会自动更新和利用历史状态
         with torch.no_grad():
-            camera_tokens, patch_tokens = self.spatial_tower(image)
+            image_fp16 = image.half()
+            camera_tokens, patch_tokens = self.spatial_tower(image_fp16)
+            camera_tokens = camera_tokens.to(raw_vision_features.dtype)
+            patch_tokens = patch_tokens.to(raw_vision_features.dtype)
         
         # 3. 构建spatial_features（兼容你现有的融合逻辑）
         spatial_features = [{"camera_tokens": camera_tokens, "patch_tokens": patch_tokens}]
@@ -570,11 +577,11 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         直接传给VLM3R，让它自己处理预处理
         """
         batch_size = images.shape[0]
-        print(f"原始输入: {images.shape}")
+        #print(f"原始输入: {images.shape}")
         
         # 🔥 直接传4D tensor给VLM3R，让prepare_input函数处理
         images_for_cut3r = images.to(device=self.spatial_tower.device, dtype=self.spatial_tower.dtype)
-        print(f"传给CUT3R: {images_for_cut3r.shape}")
+        #print(f"传给CUT3R: {images_for_cut3r.shape}")
         
         # VLM3R会在prepare_input中自动：
         # 1. resize到432x432
@@ -584,7 +591,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         with torch.no_grad():
             camera_tokens, patch_tokens = self.spatial_tower(images_for_cut3r)
         
-        print(f"✅ CUT3R输出: camera={camera_tokens.shape}, patch={patch_tokens.shape}")
+        #print(f"✅ CUT3R输出: camera={camera_tokens.shape}, patch={patch_tokens.shape}")
         
         if camera_tokens.dim() == 2:
             camera_tokens = camera_tokens.unsqueeze(1)
@@ -685,9 +692,9 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
 
 
     def embed_language_tokens(self, tokens: torch.Tensor):
-        return self.paligemma.language_model.model.embed_tokens(tokens)
+        #return self.paligemma.language_model.model.embed_tokens(tokens)
         # return self.paligemma.language_model.embed_tokens(tokens)
-
+        return self.paligemma.language_model.get_input_embeddings()(tokens)
     def handle_kv_cache(
         self,
         key_states: torch.Tensor,
@@ -746,7 +753,10 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 Optional kv cache.
         """
         models = [self.paligemma.language_model.model, self.gemma_expert.model]
-
+        #print(f"Model 0 type: {type(models[0])}")
+        #print(f"Model 1 type: {type(models[1])}")
+        #print(f"Model 0 has layers: {hasattr(models[0], 'layers')}")
+        #print(f"Model 1 has layers: {hasattr(models[1], 'layers')}")
         # RMSNorm
         num_layers = self.paligemma.config.text_config.num_hidden_layers
         for layer_idx in range(num_layers):
@@ -757,7 +767,12 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 if hidden_states is None:
                     continue
 
-                layer = models[i].layers[layer_idx]
+                #layer = models[i].layers[layer_idx]
+                # 修复：根据模型类型使用正确的访问路径
+                try:
+                    layer = models[i].model.layers[layer_idx]
+                except:
+                    layer = models[i].layers[layer_idx]
                 hidden_states = layer.input_layernorm(hidden_states)
                 hidden_shape = (*hidden_states.shape[:-1], -1, layer.self_attn.head_dim)
 
@@ -795,7 +810,12 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             outputs_embeds = []
             start = 0
             for i, hidden_states in enumerate(inputs_embeds):
-                layer = models[i].layers[layer_idx]
+                #layer = models[i].layers[layer_idx]
+                # 修复：根据模型类型使用正确的访问路径
+                try:
+                    layer = models[i].model.layers[layer_idx]
+                except:
+                    layer = models[i].layers[layer_idx]
 
                 if hidden_states is not None:
                     end = start + hidden_states.shape[1]
@@ -825,7 +845,11 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         outputs_embeds = []
         for i, hidden_states in enumerate(inputs_embeds):
             if hidden_states is not None:
-                out_emb = models[i].norm(hidden_states)
+                #out_emb = models[i].norm(hidden_states)
+                try:  # Model 0: GemmaForCausalLM
+                    out_emb = models[i].model.norm(hidden_states)
+                except:  # Model 1: GemmaModel
+                    out_emb = models[i].norm(hidden_states)
                 outputs_embeds.append(out_emb)
             else:
                 outputs_embeds.append(None)
@@ -865,7 +889,7 @@ class UnlimitedHistoryBuffer:
         batch_size = current_features.shape[0]
         expanded_sep = separator_token.expand(batch_size, -1, -1)
         stored_item = torch.cat([current_features, expanded_sep], dim=1)
-        self.buffer.append(stored_item.detach().clone())
+        self.buffer.append(stored_item.detach().clone().cpu()) #显式移动到CPU内存
         self.frame_count += 1
 
     def sample_uniform_frames(self, num_frames=5):
@@ -895,7 +919,11 @@ class UnlimitedHistoryBuffer:
         history_feature_list = self.sample_uniform_frames(self.num_sampled_frames)
         if not history_feature_list:
             return current_features
-
+        # 将历史特征移回GPU
+        device = current_features.device
+        dtype = current_features.dtype
+        history_feature_list = [f.to(device=device, dtype=dtype) for f in history_feature_list]
+    
         # 直接拼接：[hist1+sep] + [hist2+sep] + ... + [current]
         all_features = history_feature_list + [current_features]
         return torch.cat(all_features, dim=1)
