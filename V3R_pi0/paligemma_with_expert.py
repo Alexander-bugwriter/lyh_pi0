@@ -525,15 +525,15 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             if hasattr(self.spatial_tower, 'reset_state'):
                 self.spatial_tower.reset_state()
             else:
-                print("⚠️  警告：spatial_tower没有重置方法")
-                print("   可用方法:", [m for m in dir(self.spatial_tower) if not m.startswith('_')])
+                print("警告：spatial_tower没有重置方法")
+                print("可用方法:", [m for m in dir(self.spatial_tower) if not m.startswith('_')])
         
         # 重置历史缓存（如果使用的话）
         if hasattr(self, 'history_buffer') and self.history_buffer:
             self.history_buffer.clear()
             print("History buffer cleared.")
         else:
-            print("ℹ️  未启用空间编码器，无需重置")
+            print("未启用历史帧增强，无需重置")
 
     def _tensor_to_pil(self, tensor_img):
         """

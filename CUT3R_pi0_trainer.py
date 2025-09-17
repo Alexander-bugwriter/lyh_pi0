@@ -134,6 +134,11 @@ class LerobotPI0Dataset(Dataset):
     def __getitem__(self, idx):
         item = self.dataset[idx]
         #print(f"Original dataset keys: {list(item.keys())}")
+        #if idx % 10 == 0:  # 每1000个样本打印一次
+            #print(f"数据键: {list(item.keys())}")
+            #for key in item.keys():
+                #if 'episode' in key.lower():
+                    #print(f"Episode相关字段: {key} = {item[key]}")
         normalized_item = self.normalizer.normalize(item)
         
         # 图像处理
@@ -173,6 +178,7 @@ class LerobotPI0Dataset(Dataset):
                 torch.zeros_like(normalized_item["actions"][..., 0], dtype=torch.bool)
             ),
             "prompt": prompt,
+            "episode_index": item["episode_index"],
         }
 
 
@@ -184,6 +190,7 @@ class CUT3R_pi0_Trainer(L.LightningModule):
         self.policy = policy
         self.training_stage = training_stage
         self.learning_rate = learning_rate
+        self.last_episode_idx = None  # 跟踪上一个episode
         
         # 设置训练阶段
         self._setup_training_stage()
@@ -293,6 +300,13 @@ class CUT3R_pi0_Trainer(L.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """训练步骤"""
+        current_episode_idx = batch['episode_index'][0].item() if torch.is_tensor(batch['episode_index']) else batch['episode_index'][0]
+        if (self.last_episode_idx is not None and current_episode_idx != self.last_episode_idx):
+            self.policy.model.paligemma_with_expert.reset_cut3r_state()
+            print("Before a new eposide,the spatial memory is reset.")
+        
+        self.last_episode_idx = current_episode_idx
+
         #print(f"batch prompt: {batch['prompt']}")
         loss, loss_dict = self.policy(batch)
         
@@ -605,7 +619,7 @@ def train_single_stage(args, stage):
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=False, #保持周期连续性
         num_workers=args.num_workers,
         persistent_workers=True if args.num_workers > 0 else False,
         pin_memory=True,
