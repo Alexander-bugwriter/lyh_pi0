@@ -1,3 +1,7 @@
 [submodule "V3R_pi0/CUT3R"]
 	path = V3R_pi0/CUT3R
 	url = https://github.com/Alexander-bugwriter/CUT3R.git
+[submodule "third_party/lerobot"]
+	path = third_party/lerobot
+	url = https://github.com/Alexander-bugwriter/lerobot.git
+	branch = fix-version
