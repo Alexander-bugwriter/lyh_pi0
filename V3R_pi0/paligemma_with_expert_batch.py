@@ -233,36 +233,33 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         vision_hidden_size = config.paligemma_config.vision_config.hidden_size  # 1152 (SigLIP)
         paligemma_projection_dim = config.paligemma_config.projection_dim  # 2048
         if config.use_spatial_encoder:
-            print("加载CUT3R中")
             self.spatial_tower = build_spatial_tower(config, delay_load=False)
+        else:
+            self.spatial_tower=None
 
             # 🔥 修正：融合配置使用原始视觉特征维度
-            fusion_config = type('Config', (), {
-                'fusion_block': config.fusion_block,
-                'hidden_size': paligemma_projection_dim,  # 2048 (最终输出维度)
-                'mm_hidden_size': vision_hidden_size,     # 1152 (SigLIP原始输出) ✅
-                'spatial_feature_dim': config.mm_hidden_size,  # 768 (CUT3R输出) ✅
-            })()
-            self.fusion_block = build_multimodal_fusion_block(fusion_config)
+        fusion_config = type('Config', (), {
+            'fusion_block': config.fusion_block,
+            'hidden_size': paligemma_projection_dim,  # 2048 (最终输出维度)
+            'mm_hidden_size': vision_hidden_size,     # 1152 (SigLIP原始输出) ✅
+            'spatial_feature_dim': config.mm_hidden_size,  # 768 (CUT3R输出) ✅
+        })()
+        self.fusion_block = build_multimodal_fusion_block(fusion_config)
 
-            # 🔥 创建统一的投影器 (融合后使用)
-            mm_projector_config = type('Config', (), {
-                'mm_hidden_size': vision_hidden_size,  # 1152 (融合后的特征维度)
-                'hidden_size': paligemma_projection_dim,  # 2048 (目标维度)
-                'mm_projector_type': config.mm_projector_type
-            })()
-            self.mm_projector = build_vision_projector(mm_projector_config)
+        # 🔥 创建统一的投影器 (融合后使用)
+        mm_projector_config = type('Config', (), {
+            'mm_hidden_size': vision_hidden_size,  # 1152 (融合后的特征维度)
+            'hidden_size': paligemma_projection_dim,  # 2048 (目标维度)
+            'mm_projector_type': config.mm_projector_type
+        })()
+        self.mm_projector = build_vision_projector(mm_projector_config)
 
-            # 历史特征间隔符保持不变
-            embed_std = 1 / torch.sqrt(torch.tensor(config.paligemma_config.projection_dim, dtype=torch.float32))
-            self.spatial_separator_token = nn.Parameter(
-                torch.randn(1, config.paligemma_config.projection_dim) * embed_std
-            )
-            self._load_modular_components()
-        else:
-            self.spatial_tower = None
-            self.spatial_projector = None
-            self.fusion_block = None
+        # 历史特征间隔符保持不变
+        embed_std = 1 / torch.sqrt(torch.tensor(config.paligemma_config.projection_dim, dtype=torch.float32))
+        self.spatial_separator_token = nn.Parameter(
+            torch.randn(1, config.paligemma_config.projection_dim) * embed_std
+        )
+        self._load_modular_components()
 
             # 🔥 历史特征缓存 (保持你的创新)
         if config.use_history_features:
@@ -619,6 +616,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             # 🔥 直接调用spatial_tower的reset方法
             if hasattr(self.spatial_tower, 'reset_state'):
                 self.spatial_tower.reset_state()
+                print("CUT3R is reset")
             else:
                 print("警告：spatial_tower没有重置方法")
                 print("可用方法:", [m for m in dir(self.spatial_tower) if not m.startswith('_')])

@@ -740,7 +740,7 @@ def train_single_stage(args, stage):
     
     policy = PI0Policy(
         config,
-        use_spatial_encoder:bool =False,
+        use_spatial_encoder=False,
         use_history_features = False,
         history_camera_config = {
         "base_0_rgb": False,
