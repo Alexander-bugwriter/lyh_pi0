@@ -1,3 +1,4 @@
+# 我准备参考我的extract_cut3r_spatial_feature，写一个新的脚本extract_cut3r_spatial_feature_with_history_information。顺序加载episode的同时传入cut3r，在根据episode分组并且按照当前帧保存spatial token的同时，也保存归一化后的历史的base image的5帧 和他们对应的spatial token。这样我训练的时候就可以简单加载增强后的数据集并且放心用批次训练了，直接在embed_image_with_preprocessing_feature方法里按照历史帧的顺序融合投影拼接，推理的时候直接走embed_image方法，用注释掉的class UnlimitedHistoryBuffer类就行了，这个类我验证过可以工作。
 import argparse
 import os
 import sys
@@ -119,11 +120,11 @@ def group_by_episode(dataset):
     for idx in tqdm(range(len(dataset)), desc="分组数据"):
         item = dataset[idx]
         episode_idx = item['episode_index'].item()
-        episodes[episode_idx].append(item)
+        episodes[episode_idx].append((idx, item))  # 🔥 保存原始索引
     
     # 按frame_index排序每个episode
     for episode_idx in episodes:
-        episodes[episode_idx].sort(key=lambda x: x['frame_index'].item())
+        episodes[episode_idx].sort(key=lambda x: x[1]['frame_index'].item())
     
     print(f"分组完成：{len(episodes)} 个episodes")
     return dict(episodes)
@@ -153,22 +154,65 @@ def init_cut3r(cut3r_weights_path, device='cuda:0'):
     return spatial_tower
 
 
-def extract_episode_features(spatial_tower, episode_data, episode_id, normalizer, device='cuda:0'):
-    """提取单个episode的特征 - 修复版本"""
-    print(f"处理Episode {episode_id}: {len(episode_data)} 帧")
+class HistoryBuffer:
+    """历史帧缓存管理器 - 用于提取特征时管理历史信息"""
+    
+    def __init__(self, max_history_frames=5):
+        self.max_history_frames = max_history_frames
+        self.buffer = []  # 存储 (frame_index, base_image_uint8, spatial_tokens) 元组
+    
+    def add_frame(self, frame_index, base_image_uint8, spatial_tokens):
+        """添加新帧到历史缓存"""
+        frame_data = {
+            'frame_index': frame_index,
+            'base_image_uint8': base_image_uint8.clone().cpu(),  # 保存uint8格式的base image
+            'base_camera_tokens': spatial_tokens['base_camera_tokens'].clone().cpu() if spatial_tokens['base_camera_tokens'] is not None else None,
+            'base_patch_tokens': spatial_tokens['base_patch_tokens'].clone().cpu() if spatial_tokens['base_patch_tokens'] is not None else None,
+        }
+        
+        self.buffer.append(frame_data)
+    
+    def get_history_frames(self, current_frame_index):
+        """获取当前帧的历史帧信息（不包括当前帧）"""
+        # 只获取比当前帧更早的帧
+        history_frames = [f for f in self.buffer if f['frame_index'] < current_frame_index]
+        
+        # 限制历史帧数量
+        if len(history_frames) > self.max_history_frames:
+            # 采用均匀采样策略
+            indices = np.linspace(0, len(history_frames) - 1, self.max_history_frames, dtype=int)
+            history_frames = [history_frames[i] for i in indices]
+        
+        return history_frames
+    
+    def clear(self):
+        """清空缓存（episode边界时调用）"""
+        self.buffer.clear()
+
+
+def extract_episode_features_with_history(spatial_tower, episode_data, episode_id, normalizer, 
+                                        max_history_frames=5, device='cuda:0'):
+    """提取单个episode的特征 - 包含历史信息"""
+    print(f"处理Episode {episode_id}: {len(episode_data)} 帧 (包含历史信息)")
     
     # 重置CUT3R状态
     if hasattr(spatial_tower, 'reset_state'):
         spatial_tower.reset_state()
     
+    # 创建历史缓存管理器
+    history_buffer = HistoryBuffer(max_history_frames)
+    
     episode_features = {
         'episode_id': episode_id,
         'num_frames': len(episode_data),
+        'max_history_frames': max_history_frames,
         'features': []
     }
     
     with torch.no_grad():
-        for frame_data in tqdm(episode_data, desc=f"Episode {episode_id}"):
+        for frame_idx, (dataset_idx, frame_data) in enumerate(tqdm(episode_data, desc=f"Episode {episode_id}")):
+            
+            current_frame_index = frame_data['frame_index'].item()
             
             # 🔥 关键步骤1：应用与训练时相同的归一化和图像预处理
             images_dict = normalize_and_prepare_images(frame_data, normalizer)
@@ -179,38 +223,59 @@ def extract_episode_features(spatial_tower, episode_data, episode_id, normalizer
             # 🔥 关键步骤3：确保CUT3R接收到正确格式的图像
             if len(processed_images) >= 1:
                 base_image = processed_images[0].to(device=device, dtype=torch.float16)
-                wrist_image = processed_images[1].to(device=device, dtype=torch.float16)
+                wrist_image = processed_images[1].to(device=device, dtype=torch.float16) if len(processed_images) > 1 else base_image
             else:
-                print(f"警告：Episode {episode_id} frame 缺少图像数据")
+                print(f"警告：Episode {episode_id} frame {current_frame_index} 缺少图像数据")
                 continue
             
             # 🔥 按顺序通过CUT3R提取特征
             base_camera_tokens, base_patch_tokens = spatial_tower(base_image.unsqueeze(0))
             wrist_camera_tokens, wrist_patch_tokens = spatial_tower(wrist_image.unsqueeze(0))
             
-            # 保存帧特征
+            # 获取当前帧的历史信息
+            history_frames = history_buffer.get_history_frames(current_frame_index)
+            
+            # 保存帧特征（包含历史信息）
             frame_features = {
-                'frame_index': frame_data['frame_index'].item(),
+                # 基本信息
+                'frame_index': current_frame_index,
                 'episode_index': frame_data['episode_index'].item(),
                 'timestamp': frame_data['timestamp'].item(),
+                'dataset_idx': dataset_idx,
                 
-                # base相机特征
+                # 🔥 当前帧的spatial tokens
                 'base_camera_tokens': base_camera_tokens.cpu() if base_camera_tokens is not None else None,
                 'base_patch_tokens': base_patch_tokens.cpu() if base_patch_tokens is not None else None,
-                
-                # wrist相机特征
                 'wrist_camera_tokens': wrist_camera_tokens.cpu() if wrist_camera_tokens is not None else None,
                 'wrist_patch_tokens': wrist_patch_tokens.cpu() if wrist_patch_tokens is not None else None,
+                
+                # 🔥 新增：历史帧信息
+                'history_info': {
+                    'num_history_frames': len(history_frames),
+                    'max_history_frames': max_history_frames,
+                    'history_frames': history_frames  # 包含历史帧的base_image和spatial_tokens
+                }
             }
             
             episode_features['features'].append(frame_features)
+            
+            # 将当前帧添加到历史缓存中
+            current_spatial_tokens = {
+                'base_camera_tokens': base_camera_tokens,
+                'base_patch_tokens': base_patch_tokens,
+            }
+            history_buffer.add_frame(
+                current_frame_index, 
+                images_dict["base_0_rgb"],  # uint8格式的base image
+                current_spatial_tokens
+            )
     
     return episode_features
 
 
-def validate_preprocessing(dataset, normalizer, device='cuda:0'):
-    """验证预处理流程的正确性"""
-    print("🔍 验证预处理流程...")
+def validate_preprocessing_with_history(dataset, normalizer, device='cuda:0'):
+    """验证预处理流程的正确性（包含历史信息检查）"""
+    print("🔍 验证预处理流程（包含历史信息）...")
     
     # 取一个样本进行验证
     sample_item = dataset[0]
@@ -220,7 +285,8 @@ def validate_preprocessing(dataset, normalizer, device='cuda:0'):
         img = sample_item["image"]
         wrist_img = sample_item.get("wrist_image")
         print(f"  image: min={img.min():.3f}, max={img.max():.3f}, shape={img.shape}, dtype={img.dtype}")
-        print(f"  wrist_image: min={wrist_img.min():.3f}, max={wrist_img.max():.3f}, shape={wrist_img.shape}, dtype={wrist_img.dtype}")
+        if wrist_img is not None:
+            print(f"  wrist_image: min={wrist_img.min():.3f}, max={wrist_img.max():.3f}, shape={wrist_img.shape}, dtype={wrist_img.dtype}")
     
     # 应用归一化
     images_dict = normalize_and_prepare_images(sample_item, normalizer)
@@ -237,6 +303,30 @@ def validate_preprocessing(dataset, normalizer, device='cuda:0'):
     print("✅ 预处理验证完成")
 
 
+def test_history_buffer():
+    """测试历史缓存功能"""
+    print("🧪 测试历史缓存功能...")
+    
+    buffer = HistoryBuffer(max_history_frames=3)
+    
+    # 模拟添加帧
+    for i in range(7):
+        fake_image = torch.randint(0, 255, (3, 224, 224), dtype=torch.uint8)
+        fake_tokens = {
+            'base_camera_tokens': torch.randn(1, 1, 768),
+            'base_patch_tokens': torch.randn(1, 729, 768)
+        }
+        buffer.add_frame(i, fake_image, fake_tokens)
+        
+        history = buffer.get_history_frames(i)
+        print(f"  帧 {i}: 历史帧数量 = {len(history)}")
+        if history:
+            history_indices = [h['frame_index'] for h in history]
+            print(f"    历史帧索引: {history_indices}")
+    
+    print("✅ 历史缓存测试完成")
+
+
 def main():
     parser = argparse.ArgumentParser()
     
@@ -248,6 +338,10 @@ def main():
     # 模型参数
     parser.add_argument("--cut3r_weights_path", type=str, required=True)
     
+    # 🔥 新增：历史帧相关参数
+    parser.add_argument("--max_history_frames", type=int, default=3,
+                       help="最大历史帧数量")
+    
     # 其他参数
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--image_size", type=int, default=224)
@@ -255,11 +349,19 @@ def main():
     parser.add_argument("--debug_episodes", type=int, default=None)
     parser.add_argument("--validate_preprocessing", action="store_true", 
                        help="验证预处理流程的正确性")
+    parser.add_argument("--test_history_buffer", action="store_true",
+                       help="测试历史缓存功能")
     
     args = parser.parse_args()
     
-    print("LeRobot CUT3R特征预提取 - 修复版")
+    print("LeRobot CUT3R特征预提取（包含历史信息）")
     print(f"输出目录: {args.output_dir}")
+    print(f"最大历史帧数: {args.max_history_frames}")
+    
+    # 可选：测试历史缓存功能
+    if args.test_history_buffer:
+        test_history_buffer()
+        return
     
     # 🔥 关键：加载数据集和归一化器
     dataset, normalizer = load_dataset_with_normalizer(
@@ -272,7 +374,7 @@ def main():
     
     # 可选：验证预处理流程
     if args.validate_preprocessing:
-        validate_preprocessing(dataset, normalizer, args.device)
+        validate_preprocessing_with_history(dataset, normalizer, args.device)
     
     # 按episode分组
     episodes_dict = group_by_episode(dataset)
@@ -285,20 +387,29 @@ def main():
     
     # 处理每个episode
     for episode_id, episode_data in episodes_dict.items():
-        # 🔥 关键：传入归一化器
-        episode_features = extract_episode_features(
-            spatial_tower, episode_data, episode_id, normalizer, args.device
+        # 🔥 关键：提取包含历史信息的特征
+        episode_features = extract_episode_features_with_history(
+            spatial_tower, episode_data, episode_id, normalizer, 
+            args.max_history_frames, args.device
         )
         
         # 保存特征
-        save_path = os.path.join(args.output_dir, f"episode_spatial_features_{episode_id:06d}.pkl")
+        save_path = os.path.join(args.output_dir, f"episode_spatial_features_with_history_{episode_id:06d}.pkl")
         with open(save_path, 'wb') as f:
             pickle.dump(episode_features, f, protocol=pickle.HIGHEST_PROTOCOL)
         
         print(f"Episode {episode_id} 保存到: {save_path}")
+        
+        # 🔥 额外：保存一些统计信息
+        total_history_frames = sum(len(f['history_info']['history_frames']) for f in episode_features['features'])
+        avg_history_frames = total_history_frames / len(episode_features['features']) if episode_features['features'] else 0
+        print(f"  平均历史帧数: {avg_history_frames:.1f}")
     
-    print(f"✅ 特征提取完成！处理了 {len(episodes_dict)} 个episodes")
-    print(f"🔥 重要提醒：现在提取的特征使用了正确的归一化流程，与训练时保持一致")
+    print(f"✅ 带历史信息的特征提取完成！处理了 {len(episodes_dict)} 个episodes")
+    print(f"🔥 重要提醒：现在每帧都包含历史帧信息，可以直接用于训练时的历史特征融合")
+    print(f"📝 使用说明：")
+    print(f"  - 训练时：直接在embed_image_with_preprocessing_feature中融合历史特征")
+    print(f"  - 推理时：使用embed_image方法和UnlimitedHistoryBuffer类")
 
 
 if __name__ == "__main__":

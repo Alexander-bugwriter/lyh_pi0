@@ -562,8 +562,7 @@ class Cut3rSpatialTower(nn.Module):
         if not self.is_loaded:
             print("⚠️  Spatial tower not loaded, cannot reset")
             return
-            
-        print("🔄 执行CUT3R状态重置")
+             #       print("🔄 执行CUT3R状态重置")
         
         # 创建虚拟输入
         dummy_image = torch.zeros(1, 3, 224, 224, device=self.device, dtype=self.dtype)
@@ -629,7 +628,7 @@ class Cut3rSpatialTower(nn.Module):
                     update=views[0].get("update", None),
                 )
                 
-                print("✅ CUT3R状态重置完成")
+#                print("✅ CUT3R状态重置完成")
                 
             except Exception as e:
                 print(f"⚠️  重置过程中出现错误: {e}")
