@@ -332,7 +332,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         
         # 保存各模块
         torch.save(self.fusion_block.state_dict(), save_path / 'fusion_block.pth')
-        # torch.save(self.mm_projector.state_dict(), save_path / 'mm_projector.pth') 
+        torch.save(self.mm_projector.state_dict(), save_path / 'mm_projector.pth') 
         torch.save(self.spatial_separator_token.data, save_path / 'spatial_separator_token.pth')
         
         print(f"💾 模块组件保存完成: {save_path}")
