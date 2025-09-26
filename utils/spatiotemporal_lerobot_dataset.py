@@ -153,6 +153,8 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
         
         self.spatial_features_dir = spatial_features_dir
         self.spatial_features_cache = {}
+        self.debug_episodes = debug_episodes
+        
         
         if spatial_features_dir:
             self._load_spatial_features_index()
@@ -173,6 +175,12 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             print("使用标准spatial features（无历史信息）")
         else:
             print("使用带历史信息的spatial features")
+        
+        if self.debug_episodes is not None:
+            # 根据文件名排序，确保加载前N个episodes
+            feature_files = sorted(feature_files, key=lambda x: int(x.stem.split('_')[-1]))
+            feature_files = feature_files[:self.debug_episodes]
+            print(f"🐛 调试模式：只加载前 {self.debug_episodes} 个episodes的特征文件")
         
         print(f"加载 {len(feature_files)} 个特征文件...")
         

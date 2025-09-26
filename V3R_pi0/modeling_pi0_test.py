@@ -41,9 +41,9 @@ class PI0Policy(PreTrainedPolicy):
         },
         
         #新增：融合和投影配置
-        mm_projector_type:str="mlp2x_gelu",
-        mm_hidden_size:int=768,
+        
         fusion_block:str="cross_attention",
+        components_path: str = None,
         
         #新增：历史特征配置（如果你需要的话）
         use_history_features:bool=True,
@@ -74,6 +74,7 @@ class PI0Policy(PreTrainedPolicy):
             attention_implementation=self.config.attention_implementation,
             
             mode=mode,#传递训练或者推理参数
+            components_path=components_path,
             # 🔥 新增：空间编码配置
             use_spatial_encoder=use_spatial_encoder,
             spatial_tower=spatial_tower,
@@ -288,7 +289,6 @@ class PI0Policy(PreTrainedPolicy):
             enhanced_prompt += "\nSpatial Enhancement: Advanced 3D geometry and depth perception available. Use spatial information for precise manipulation."
         elif has_history_enhancement:
             enhanced_prompt += "\nTemporal Context: History frames seperated by special token are provided with current view. Understand the temporal imformation of the total task and finish it."
-        
         elif has_spatial_enhancement and has_history_enhancement:
             enhanced_prompt += "\nMultimodal Integration: Combine spatial and temporal information for comprehensive scene understanding. History frames seperated by special token are provided with current view. All the images are enhanced by spatial information.Please focus on the task and finish it."
         
@@ -328,7 +328,7 @@ class PI0Policy(PreTrainedPolicy):
             prompt = [p if p.startswith("<bos>") else f"<bos>{p}" for p in prompt]
             prompt = [self._enhance_prompt_based_on_config(p) for p in prompt]  # 🔥 新增这一行
             prompt = [p if p.endswith("\n") else f"{p}\n" for p in prompt]
-            print("prompt:",prompt)
+#            print("prompt:",prompt)
             tokenized_prompt = self.language_tokenizer.__call__(
                 prompt,
                 padding="max_length",
@@ -424,7 +424,8 @@ class PI0FlowMatching(nn.Module):
             
             # 模仿VLM3R：如果CUDA可用，明确移动到CUDA
             if torch.cuda.is_available():
-                device = torch.device("cuda")
+                # device = torch.device("cuda")
+                device = next(self.paligemma_with_expert.parameters()).device
                 dtype = torch.float16
                 
                 print(f"Moving spatial tower to {device} with dtype {dtype}")

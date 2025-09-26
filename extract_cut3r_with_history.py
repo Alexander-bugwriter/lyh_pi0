@@ -8,7 +8,7 @@ from pathlib import Path
 from collections import defaultdict
 from tqdm import tqdm
 import numpy as np
-
+import gc
 # LeRobot imports
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from utils.dataset_config import get_dataset_info, generate_delta_timestamps
@@ -269,6 +269,13 @@ def extract_episode_features_with_history(spatial_tower, episode_data, episode_i
                 images_dict["base_0_rgb"],  # uint8格式的base image
                 current_spatial_tokens
             )
+
+    history_buffer.clear()
+    del history_buffer
+        
+        
+    
+    gc.collect()
     
     return episode_features
 
