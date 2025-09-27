@@ -281,7 +281,13 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         # base_path = Path(script_dir) / 'spatial_encoder_checkpoint'
         if components_path is None:
             print("组件路径未指定，使用随机初始化")
+            return
         else:
+            components_path = Path(components_path)
+            lora_adapter_path = components_path / "lora_adapter"
+            if lora_adapter_path.exists():
+                print("lora存在于指定路径")
+                self._merge_lora_adapter(lora_adapter_path)
             modules_config = {
                 'fusion_block': {
                     'path': components_path / 'fusion_block.pth',
@@ -317,6 +323,22 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                         print(f"加载{config['name']}失败: {e}，使用随机初始化")
             else:
                 print(f"{config['name']}不存在，使用随机初始化")
+    def _merge_lora_adapter(self, lora_adapter_path):
+        """直接合并LoRA adapter"""
+        print(f"合并LoRA adapter: {lora_adapter_path}")
+    
+        try:
+            from peft import PeftModel
+        
+            language_model = self.paligemma.language_model
+            peft_model = PeftModel.from_pretrained(language_model, lora_adapter_path)
+            merged_model = peft_model.merge_and_unload()
+            self.paligemma.language_model = merged_model
+        
+            print("  LoRA合并完成")
+        
+        except Exception as e:
+            print(f"  LoRA合并失败: {e}")
 
     def save_modular_components(self, save_path=None):
         """保存训练好的模块组件"""
