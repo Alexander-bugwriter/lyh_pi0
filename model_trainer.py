@@ -308,6 +308,113 @@ class Lerobot_Trainer(L.LightningModule):
         print(f"  ✅ training_info.json")
         
         return save_dir
+    
+    def save_lora_checkpoint(self, save_dir):
+        """保存LoRA checkpoint（只保存adapter，节省空间）"""
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"💾 保存LoRA checkpoint到: {save_dir}")
+        
+        paligemma_model = self.policy.model.paligemma_with_expert
+
+        # 1. 保存LoRA adapter（如果存在）
+        has_lora = False
+        if (hasattr(paligemma_model, 'paligemma') and 
+            hasattr(paligemma_model.paligemma, 'language_model')):
+            
+            language_model = paligemma_model.paligemma.language_model
+            if hasattr(language_model, 'save_pretrained'):  # 是PEFT模型
+                adapter_dir = save_dir / "lora_adapter"
+                language_model.save_pretrained(adapter_dir)
+                print(f"  ✅ LoRA adapter -> {adapter_dir}")
+                has_lora = True
+        
+        # 2. 保存其他训练组件（fusion_block等）
+        try:
+            paligemma_model.save_modular_components(save_dir)
+            print(f"  ✅ 其他组件")
+        except Exception as e:
+            print(f"  ❌ 其他组件保存失败: {e}")
+        
+        # 3. 保存训练元信息
+        checkpoint_info = {
+            "training_mode": self.training_mode,
+            "learning_rate": self.learning_rate,
+            "epoch": self.current_epoch,
+            "has_lora": has_lora,
+            "checkpoint_type": "lora_only",  # 标记这是LoRA-only checkpoint
+            "base_model_needed": True,  # 标记需要原始模型来加载
+        }
+        
+        with open(save_dir / "checkpoint_info.json", "w") as f:
+            json.dump(checkpoint_info, f, indent=2)
+        print(f"  ✅ checkpoint_info.json")
+        
+        return save_dir
+    
+    def save_merged_final_model(self, save_dir):
+        """保存合并后的最终模型（完整可用）"""
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"🎯 保存最终合并模型到: {save_dir}")
+        
+        paligemma_model = self.policy.model.paligemma_with_expert
+        
+        # 🔥 关键：合并LoRA到原模型
+        if (hasattr(paligemma_model, 'paligemma') and 
+            hasattr(paligemma_model.paligemma, 'language_model')):
+            
+            language_model = paligemma_model.paligemma.language_model
+            if hasattr(language_model, 'merge_and_unload'):
+                print("  🔄 合并LoRA参数到主模型...")
+                merged_model = language_model.merge_and_unload()
+                paligemma_model.paligemma.language_model = merged_model
+                print("  ✅ LoRA合并完成")
+        
+        # 保存完整模型
+        try:
+            from safetensors.torch import save_model
+            save_model(self.policy, save_dir / "model.safetensors")
+            print(f"  ✅ model.safetensors")
+        except Exception as e:
+            print(f"  ❌ model.safetensors 保存失败: {e}")
+            # 降级到torch保存
+            torch.save(self.policy.state_dict(), save_dir / "model.pth")
+            print(f"  ✅ model.pth (降级保存)")
+        
+        # 保存配置
+        config_dict = self.policy.config.__dict__.copy()
+        config_dict['type'] = 'pi0'
+        config_dict['training_mode'] = self.training_mode
+        
+        with open(save_dir / 'config.json', 'w') as f:
+            json.dump(config_dict, f, indent=2)
+        print(f"  ✅ config.json")
+        
+        # 保存其他组件
+        try:
+            paligemma_model.save_modular_components(save_dir)
+            print(f"  ✅ 其他组件")
+        except Exception as e:
+            print(f"  ❌ 其他组件保存失败: {e}")
+        
+        # 保存最终模型信息
+        final_info = {
+            "training_mode": self.training_mode,
+            "learning_rate": self.learning_rate,
+            "final_epoch": self.current_epoch,
+            "checkpoint_type": "merged_final",  # 标记这是合并后的最终模型
+            "lora_merged": True,
+            "standalone": True,  # 标记可以独立使用
+        }
+        
+        with open(save_dir / "model_info.json", "w") as f:
+            json.dump(final_info, f, indent=2)
+        print(f"  ✅ model_info.json")
+        
+        return save_dir
 
 
 # 🎯 简化的保存回调
@@ -321,12 +428,15 @@ class ModelCheckpointCallback(L.Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         if (trainer.current_epoch + 1) % self.every_n_epochs == 0:
             epoch_save_dir = self.save_dir / f"epoch_{trainer.current_epoch}"
-            pl_module.save_components(epoch_save_dir)
+            # pl_module.save_components(epoch_save_dir)
+            pl_module.save_lora_checkpoint(epoch_save_dir)
     
     def on_train_end(self, trainer, pl_module):
         # 最终保存
         final_save_dir = self.save_dir / "final"
-        pl_module.save_components(final_save_dir)
+        # pl_module.save_components(final_save_dir)
+        pl_module.save_merged_final_model(final_save_dir)
+
 
 
 def train_with_mode(args):
