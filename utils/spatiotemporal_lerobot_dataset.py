@@ -10,6 +10,9 @@ from pathlib import Path
 from torchvision.transforms.v2 import Compose, Resize
 from typing import List, Dict
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+import pickle
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from .normalizers import Normalizer
 from .dataset_config import get_dataset_info, generate_delta_timestamps
@@ -29,65 +32,59 @@ class LerobotPI0Dataset(Dataset):
         if debug_episodes:
             episodes = list(range(debug_episodes))
             print(f"调试模式：只加载前 {debug_episodes} 个episodes")
-        image_transforms = Resize((image_size, image_size))
-        info = get_dataset_info(root)
-        delta_timestamps = generate_delta_timestamps(info['fps'], info['features'], action_horizon) 
-        # 标准lerobot格式的时间戳配置
-        #delta_timestamps = {
-        #    "observation.images.base": [0],
-        #    "observation.images.wrist": [0], 
-        #    "observation.state": [0],
-        #    "action": [i / dataset.fps for i in range(action_horizon)],
-        #    }
+        # 添加缓存逻辑
         
-        try:
-            self.dataset = LeRobotDataset(
-                repo_id=repo_id,
-                root=root,
-                image_transforms=image_transforms,
-                delta_timestamps=delta_timestamps,
-                episodes=episodes
-            )
+        cache_file = f".dataset_cache_{debug_episodes if debug_episodes is not None else 'all'}.pkl"
+        cache_path = os.path.abspath(cache_file)  # 获取绝对路径
+
+        
+        print(f"DEBUG: cache_file = {cache_file}")
+        print(f"DEBUG: cache_path = {cache_path}")
+        print(f"DEBUG: 当前工作目录 = {os.getcwd()}")
+        print(f"DEBUG: 缓存文件是否存在 = {os.path.exists(cache_file)}")
+        if os.path.exists(cache_file):
+            print(f"从缓存加载: {cache_file}")
+            with open(cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+                self.dataset = cache_data['dataset']
+                self.normalizer = cache_data['normalizer']
             print(f"数据集加载成功，共 {len(self.dataset)} 条数据")
-            
-        except Exception as e:
-            print(f"数据集加载失败: {e}")
-            
-            # 调试信息：检查本地路径结构
-            if root and os.path.exists(root):
-                print(f"检查本地路径结构:")
-                try:
-                    # 检查关键文件
-                    key_paths = [
-                        os.path.join(root, "meta", "info.json"),
-                        os.path.join(root, "meta", "stats.json"),
-                        os.path.join(root, "data")
-                    ]
-                    for key_path in key_paths:
-                        if os.path.exists(key_path):
-                            print(f" {os.path.relpath(key_path, root)}")
-                        else:
-                            print(f" {os.path.relpath(key_path, root)}")
-                            
-                    # 检查data目录内容
-                    data_dir = os.path.join(root, "data")
-                    if os.path.exists(data_dir):
-                        chunks = [d for d in os.listdir(data_dir) if d.startswith("chunk-")]
-                        print(f"发现 {len(chunks)} 个chunk目录")
-                        
-                except Exception as debug_e:
-                    print(f"调试失败: {debug_e}")
+        else:
+            print("首次加载dataset，构建缓存中......")
+            image_transforms = Resize((image_size, image_size))
+            info = get_dataset_info(root)
+            delta_timestamps = generate_delta_timestamps(info['fps'], info['features'], action_horizon)
+
+            try:
+                self.dataset = LeRobotDataset(
+                    repo_id=repo_id,
+                    root=root,
+                    image_transforms=image_transforms,
+                    delta_timestamps=delta_timestamps,
+                    episodes=episodes
+                )
+                print(f"数据集加载成功，共 {len(self.dataset)} 条数据")
+                self.normalizer = Normalizer(
+                    norm_stats=self.dataset.meta.stats,
+                    norm_type={
+                        "image": "identity",
+                        "wrist_image": "identity",
+                        "state": "meanstd",
+                        "actions": "meanstd",
+                    }
+                )
+                with open(cache_file, 'wb') as f:
+                    pickle.dump({
+                        'dataset': self.dataset,
+                        'normalizer': self.normalizer
+                    }, f)
+                print(f"已缓存到: {cache_file}")
+
+            except Exception as e:
+                print(f"数据集加载失败: {e}")
         
-        # 标准化器配置
-        self.normalizer = Normalizer(
-            norm_stats=self.dataset.meta.stats,
-            norm_type={
-                "image": "identity",
-                "wrist_image": "identity", 
-                "state": "meanstd",
-                "actions": "meanstd",
-            }
-        )
+
+
 
 
     def __len__(self):
@@ -150,50 +147,141 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
                  dataset_fps=10.0, debug_episodes=None, spatial_features_dir=None):
         
         super().__init__(repo_id, root, image_size, action_horizon, dataset_fps, debug_episodes)
-        
+        print(f"DEBUG: spatial_features_dir = {spatial_features_dir}")
+        print(f"DEBUG: spatial_features_dir type = {type(spatial_features_dir)}")
+        print(f"DEBUG: spatial_features_dir exists = {Path(spatial_features_dir).exists() if spatial_features_dir else False}")
+    
         self.spatial_features_dir = spatial_features_dir
         self.spatial_features_cache = {}
         self.debug_episodes = debug_episodes
-        
-        
+
+
         if spatial_features_dir:
             self._load_spatial_features_index()
-    
+
+    @staticmethod
+    def load_single_file(file_path):
+        try:
+            with open(file_path, 'rb') as f:
+                episode_features = pickle.load(f)
+                return file_path, episode_features['episode_id'], episode_features
+        except Exception as e:
+            print(f"加载 {file_path} 失败: {e}")
+            return file_path, None, None
+
     def _load_spatial_features_index(self):
-        """加载spatial features索引（支持历史信息）"""
-        import pickle
-        from pathlib import Path
-        
-        features_dir = Path(self.spatial_features_dir)
-        
-        # 🔥 先尝试新的历史特征文件
-        feature_files = list(features_dir.glob("episode_spatial_features_with_history_*.pkl"))
-        
-        # 如果没有，使用标准特征文件
-        if not feature_files:
-            feature_files = list(features_dir.glob("episode_spatial_features_*.pkl"))
-            print("使用标准spatial features（无历史信息）")
+        """建立文件路径索引，确保排序"""
+        cache_dir = Path(self.spatial_features_dir) / ".cache"
+        cache_dir.mkdir(exist_ok=True)
+        debug_suffix = f"_{self.debug_episodes}" if self.debug_episodes is not None else "_all"
+        cache_filename = f"spatial_index_cache{debug_suffix}.pkl"
+        index_cache_file = cache_dir / cache_filename
+        if os.path.exists(index_cache_file):
+            print(f"从缓存加载索引: {index_cache_file}")
+            with open(index_cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+                spatial_files_index  = cache_data['spatial_path_index']
+            print(f"索引缓存加载成功，共 {len(spatial_files_index)} 个episodes")
+
+            # 🔥 还是打印验证信息
+            #self._print_cache_validation()
         else:
-            print("使用带历史信息的spatial features")
-        
-        if self.debug_episodes is not None:
-            # 根据文件名排序，确保加载前N个episodes
+            features_dir = Path(self.spatial_features_dir)
+            feature_files = list(features_dir.glob("episode_spatial_features_with_history_*.pkl"))
+            if not feature_files:
+                feature_files = list(features_dir.glob("episode_spatial_features_*.pkl"))
+                print("使用标准spatial features（无历史信息）")
+            else:
+                print("使用带历史信息的spatial features")
+
+            # 🔥 关键1：确保所有情况下都排序
             feature_files = sorted(feature_files, key=lambda x: int(x.stem.split('_')[-1]))
-            feature_files = feature_files[:self.debug_episodes]
-            print(f"🐛 调试模式：只加载前 {self.debug_episodes} 个episodes的特征文件")
+    
+            if self.debug_episodes is not None:
+                feature_files = feature_files[:self.debug_episodes]
+                print(f"调试模式：只处理前 {self.debug_episodes} 个episodes的特征文件")
+
+            print(f"建立 {len(feature_files)} 个文件的路径索引...")
+            # 🔥 构建路径索引（不读取数据）
+            spatial_files_index = {}
+            for file_path in feature_files:
+                episode_id = int(file_path.stem.split('_')[-1])
+                spatial_files_index[episode_id] = file_path
         
-        print(f"加载 {len(feature_files)} 个特征文件...")
-        
-        for feature_file in feature_files:
-            try:
-                with open(feature_file, 'rb') as f:
-                    episode_features = pickle.load(f)
-                    episode_id = episode_features['episode_id']
-                    self.spatial_features_cache[episode_id] = episode_features
-            except Exception as e:
-                print(f"加载 {feature_file} 失败: {e}")
-        
-        print(f"特征索引加载完成，覆盖 {len(self.spatial_features_cache)} 个episodes")
+            # 保存路径索引缓存
+            with open(index_cache_file, 'wb') as f:
+                pickle.dump({'spatial_path_index': spatial_files_index}, f)
+            print(f"路径索引已缓存到: {index_cache_file}")
+            
+            #self._print_cache_validation()
+        # 🔥 第二步：根据路径索引，单线程读取所有数据到内存
+        print(f"单线程加载 {len(spatial_files_index)} 个特征文件到内存...")
+        self.spatial_features_cache = {}  # 这里存完整数据
+
+        for i, (episode_id, file_path) in enumerate(sorted(spatial_files_index.items())):
+            if i % 100 == 0:
+                print(f"  加载进度: {i}/{len(spatial_files_index)}")
+
+            with open(file_path, 'rb') as f:
+                episode_features = pickle.load(f)
+                self.spatial_features_cache[episode_id] = episode_features
+
+        print(f"所有特征已加载到内存，共 {len(self.spatial_features_cache)} 个episodes")
+    def _print_cache_validation(self):
+        """打印缓存验证信息"""
+        print("📋 缓存内容验证:")
+        episode_ids = sorted(self.spatial_features_cache.keys())
+        print(f"Episode ID范围: {episode_ids[0]} 到 {episode_ids[-1]}")
+        print(f"前10个episode的文件映射:")
+        for i, episode_id in enumerate(episode_ids[:10]):
+            file_path = self.spatial_features_cache[episode_id]
+            filename_id = int(file_path.stem.split('_')[-1])
+            status = "✓" if filename_id == episode_id else "✗"
+            print(f"  Episode {episode_id} -> {file_path.name} {status}")
+    
+        # 检查连续性
+        expected_ids = list(range(len(episode_ids)))
+        if episode_ids == expected_ids:
+            print("✅ Episode ID连续性检查: 通过")
+        else:
+            print(f"⚠️  Episode ID不连续: 期望{expected_ids[:5]}...，实际{episode_ids[:5]}...") 
+    # def _load_spatial_features_index(self):
+    #     """加载spatial features索引（支持历史信息）"""
+    #     import pickle
+    #     from pathlib import Path
+    #
+    #     features_dir = Path(self.spatial_features_dir)
+    #
+    #     # 🔥 先尝试新的历史特征文件
+    #     feature_files = list(features_dir.glob("episode_spatial_features_with_history_*.pkl"))
+    #
+    #     # 如果没有，使用标准特征文件
+    #     if not feature_files:
+    #         feature_files = list(features_dir.glob("episode_spatial_features_*.pkl"))
+    #         print("使用标准spatial features（无历史信息）")
+    #     else:
+    #         print("使用带历史信息的spatial features")
+    #
+    #     if self.debug_episodes is not None:
+    #         # 根据文件名排序，确保加载前N个episodes
+    #         feature_files = sorted(feature_files, key=lambda x: int(x.stem.split('_')[-1]))
+    #         feature_files = feature_files[:self.debug_episodes]
+    #         print(f"🐛 调试模式：只加载前 {self.debug_episodes} 个episodes的特征文件")
+    #
+    #     print(f"加载 {len(feature_files)} 个特征文件...")
+    #
+    #     for feature_file in feature_files:
+    #         try:
+    #             with open(feature_file, 'rb') as f:
+    #                 episode_features = pickle.load(f)
+    #                 episode_id = episode_features['episode_id']
+    #                 self.spatial_features_cache[episode_id] = episode_features
+    #         except Exception as e:
+    #             print(f"加载 {feature_file} 失败: {e}")
+    #
+    #     print(f"特征索引加载完成，覆盖 {len(self.spatial_features_cache)} 个episodes")
+
+
     
     def __getitem__(self, idx):
         """🔥 这是唯一需要添加的方法"""
@@ -227,6 +315,11 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             
             if episode_id in self.spatial_features_cache:
                 episode_features = self.spatial_features_cache[episode_id]
+            #if episode_id in self.spatial_features_cache:
+                #file_path = self.spatial_features_cache[episode_id]  # 现在这里是路径
+                # 🔥 按需加载
+                #with open(file_path, 'rb') as f:
+                    #episode_features = pickle.load(f)
                 for frame_feat in episode_features['features']:
                     if frame_feat['frame_index'] == frame_id:
                         precomputed_spatial_features = {

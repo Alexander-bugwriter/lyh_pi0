@@ -51,7 +51,7 @@ from safetensors.torch import save_model
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.configs.policies import PreTrainedConfig
 from V3R_pi0.modeling_pi0_test import PI0Policy
-from utils.spatiotemporal_lerobot_dataset import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
+from utils.spatiotemporal_lerobot_dataset_test import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
 from peft import get_peft_model, LoraConfig, TaskType
 
 # 🎯 训练模式定义
@@ -437,7 +437,45 @@ class ModelCheckpointCallback(L.Callback):
         # pl_module.save_components(final_save_dir)
         pl_module.save_merged_final_model(final_save_dir)
 
-
+class SimpleDataModule(L.LightningDataModule):
+    def __init__(self, repo_id, root, spatial_features_dir, debug_episodes,
+                 batch_size, num_workers):
+        super().__init__()
+        
+        # Enhanced_LerobotPI0Dataset 的参数
+        self.repo_id = repo_id
+        self.root = root
+        self.image_size = 224
+        self.action_horizon = 50
+        self.dataset_fps = 10.0
+        self.debug_episodes = debug_episodes
+        self.spatial_features_dir = spatial_features_dir
+        
+        # DataLoader 的参数
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        
+    def setup(self, stage=None):
+        self.dataset = Enhanced_LerobotPI0Dataset(
+            repo_id=self.repo_id,
+            root=self.root,
+            image_size=self.image_size,
+            action_horizon=self.action_horizon,
+            dataset_fps=self.dataset_fps,
+            debug_episodes=self.debug_episodes,
+            spatial_features_dir=self.spatial_features_dir,
+        )
+        
+    def train_dataloader(self):
+        return DataLoader(
+            self.dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            persistent_workers=True if self.num_workers > 0 else False,
+            pin_memory=True,
+            collate_fn=enhanced_collate_fn,
+        )
 
 def train_with_mode(args):
     """🎯 核心训练函数 - 根据模式训练"""
@@ -464,6 +502,9 @@ def train_with_mode(args):
     #         "right_wrist_0_rgb": False,
     #     },              
     # )
+    # 🔥 显存预占用 - 加在这里
+
+
     if args.use_history_features:
         history_camera_config = {"base_0_rgb": True, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
     else:
@@ -502,25 +543,33 @@ def train_with_mode(args):
     
     # 🔧 准备数据 (复用原有逻辑)
     print("📊 准备数据...")
-    dataset = Enhanced_LerobotPI0Dataset(
+    datamodule = SimpleDataModule(
         repo_id=args.data_repo_id,
         root=args.data_root,
-        image_size=224,
-        action_horizon=50,
-        dataset_fps=10.0,
-        debug_episodes=args.debug_episodes,
         spatial_features_dir=args.spatial_features_dir,
-    )
-    
-    dataloader = DataLoader(
-        dataset,
+        debug_episodes=args.debug_episodes,
         batch_size=args.batch_size,
-        shuffle=False,
         num_workers=args.num_workers,
-        persistent_workers=True if args.num_workers > 0 else False,
-        pin_memory=True,
-        collate_fn=enhanced_collate_fn,
     )
+    # dataset = Enhanced_LerobotPI0Dataset(
+    #     repo_id=args.data_repo_id,
+    #     root=args.data_root,
+    #     image_size=224,
+    #     action_horizon=50,
+    #     dataset_fps=10.0,
+    #     debug_episodes=args.debug_episodes,
+    #     spatial_features_dir=args.spatial_features_dir,
+    # )
+    #
+    # dataloader = DataLoader(
+    #     dataset,
+    #     batch_size=args.batch_size,
+    #     shuffle=False,
+    #     num_workers=args.num_workers,
+    #     persistent_workers=True if args.num_workers > 0 else False,
+    #     pin_memory=True,
+    #     collate_fn=enhanced_collate_fn,
+    # )
     
     # 🔧 设置保存和回调
     save_dir = Path(args.output_dir) / args.mode
@@ -554,10 +603,9 @@ def train_with_mode(args):
         enable_progress_bar=True,
         log_every_n_steps=10,
     )
-    
-    # 🚀 开始训练
-    print(f"🚀 开始训练 ({args.mode})...")
-    trainer.fit(lightning_module, dataloader)
+
+    # trainer.fit(lightning_module, dataloader)
+    trainer.fit(lightning_module, datamodule)
     
     print(f"✅ 训练完成: {args.mode}")
     final_path = save_dir / "final"

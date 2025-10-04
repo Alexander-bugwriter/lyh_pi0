@@ -683,6 +683,10 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             # print("using batch fusion")
         #print("camera_tokens shape:", camera_tokens.shape)
         #print("patch_tokens shape:", patch_tokens.shape)
+        if camera_tokens.dim() == 2:
+            camera_tokens = camera_tokens.unsqueeze(1)  # [B, 1, D] -> [B, 1, D]
+        if patch_tokens.dim() == 2:
+            patch_tokens = patch_tokens.unsqueeze(1)    # [B, D] -> [B, 1, D]
         # VLM3R的特征选择逻辑
         spatial_tower_select_feature = getattr(self.config, "spatial_tower_select_feature", "all")
         spatial_tower_select_feature_list = spatial_tower_select_feature.split(",")
@@ -696,7 +700,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             elif feature_type == "all":
                 final_image_features = [camera_tokens, patch_tokens]
                 break
-        
+    
         # 拼接空间特征 (768维)
         final_image_features = torch.cat(final_image_features, dim=1).to(device=raw_vision_features.device, dtype=raw_vision_features.dtype)
         

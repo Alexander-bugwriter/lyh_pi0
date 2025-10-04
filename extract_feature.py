@@ -1,4 +1,3 @@
-# 我准备参考我的extract_cut3r_spatial_feature，写一个新的脚本extract_cut3r_spatial_feature_with_history_information。顺序加载episode的同时传入cut3r，在根据episode分组并且按照当前帧保存spatial token的同时，也保存归一化后的历史的base image的5帧 和他们对应的spatial token。这样我训练的时候就可以简单加载增强后的数据集并且放心用批次训练了，直接在embed_image_with_preprocessing_feature方法里按照历史帧的顺序融合投影拼接，推理的时候直接走embed_image方法，用注释掉的class UnlimitedHistoryBuffer类就行了，这个类我验证过可以工作。
 import argparse
 import os
 import sys
@@ -190,17 +189,17 @@ class HistoryBuffer:
         self.buffer.clear()
 
 
-def extract_episode_features_with_history(spatial_tower, episode_data, episode_id, normalizer, 
+def extract_episode_features_with_history(spatial_tower, episode_data, episode_id, normalizer, save_history,
                                         max_history_frames=5, device='cuda:0'):
     """提取单个episode的特征 - 包含历史信息"""
-    print(f"处理Episode {episode_id}: {len(episode_data)} 帧 (包含历史信息)")
+    print(f"处理Episode {episode_id}: {len(episode_data)} 帧 ")
     
     # 重置CUT3R状态
     if hasattr(spatial_tower, 'reset_state'):
         spatial_tower.reset_state()
     
     # 创建历史缓存管理器
-    history_buffer = HistoryBuffer(max_history_frames)
+    history_buffer = HistoryBuffer(max_history_frames) if save_history else None
     
     episode_features = {
         'episode_id': episode_id,
@@ -232,10 +231,17 @@ def extract_episode_features_with_history(spatial_tower, episode_data, episode_i
             base_camera_tokens, base_patch_tokens = spatial_tower(base_image.unsqueeze(0))
             wrist_camera_tokens, wrist_patch_tokens = spatial_tower(wrist_image.unsqueeze(0))
             
-            # 获取当前帧的历史信息
-            history_frames = history_buffer.get_history_frames(current_frame_index)
+            # 🔥 简化：只有启用历史特征时才获取历史信息
+            history_info = None
+            if save_history and history_buffer is not None:
+                history_frames = history_buffer.get_history_frames(current_frame_index)
+                history_info = {
+                    'num_history_frames': len(history_frames),
+                    'max_history_frames': max_history_frames,
+                    'history_frames': history_frames
+                }
             
-            # 保存帧特征（包含历史信息）
+            # 保存帧特征
             frame_features = {
                 # 基本信息
                 'frame_index': current_frame_index,
@@ -248,30 +254,28 @@ def extract_episode_features_with_history(spatial_tower, episode_data, episode_i
                 'base_patch_tokens': base_patch_tokens.cpu() if base_patch_tokens is not None else None,
                 'wrist_camera_tokens': wrist_camera_tokens.cpu() if wrist_camera_tokens is not None else None,
                 'wrist_patch_tokens': wrist_patch_tokens.cpu() if wrist_patch_tokens is not None else None,
-                
-                # 🔥 新增：历史帧信息
-                'history_info': {
-                    'num_history_frames': len(history_frames),
-                    'max_history_frames': max_history_frames,
-                    'history_frames': history_frames  # 包含历史帧的base_image和spatial_tokens
-                }
             }
+            
+            # 🔥 只有启用历史特征时才添加history_info
+            if history_info is not None:
+                frame_features['history_info'] = history_info
             
             episode_features['features'].append(frame_features)
             
-            # 将当前帧添加到历史缓存中
-            current_spatial_tokens = {
-                'base_camera_tokens': base_camera_tokens,
-                'base_patch_tokens': base_patch_tokens,
-            }
-            history_buffer.add_frame(
-                current_frame_index, 
-                images_dict["base_0_rgb"],  # uint8格式的base image
-                current_spatial_tokens
-            )
-
-    history_buffer.clear()
-    del history_buffer
+            # 🔥 只有启用历史特征时才更新历史缓存
+            if save_history and history_buffer is not None:
+                current_spatial_tokens = {
+                    'base_camera_tokens': base_camera_tokens,
+                    'base_patch_tokens': base_patch_tokens,
+                }
+                history_buffer.add_frame(
+                    current_frame_index, 
+                    images_dict["base_0_rgb"],
+                    current_spatial_tokens
+                )
+    if history_buffer:
+        history_buffer.clear()
+        del history_buffer
         
         
     
@@ -354,6 +358,8 @@ def main():
     parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument("--action_horizon", type=int, default=50)
     parser.add_argument("--debug_episodes", type=int, default=None)
+    parser.add_argument("--save_history_features", action="store_true",
+                   help="是否保存历史特征（不指定则只保存当前帧）")
     parser.add_argument("--validate_preprocessing", action="store_true", 
                        help="验证预处理流程的正确性")
     parser.add_argument("--test_history_buffer", action="store_true",
@@ -363,7 +369,10 @@ def main():
     
     print("LeRobot CUT3R特征预提取（包含历史信息）")
     print(f"输出目录: {args.output_dir}")
-    print(f"最大历史帧数: {args.max_history_frames}")
+    if args.save_history_features:
+        print(f"最大历史帧数: {args.max_history_frames}")
+    else:
+        print("保存当前时刻特征，没有历史特征")
     
     # 可选：测试历史缓存功能
     if args.test_history_buffer:
@@ -396,21 +405,20 @@ def main():
     for episode_id, episode_data in episodes_dict.items():
         # 🔥 关键：提取包含历史信息的特征
         episode_features = extract_episode_features_with_history(
-            spatial_tower, episode_data, episode_id, normalizer, 
+            spatial_tower, episode_data, episode_id, normalizer,args.save_history_features, 
             args.max_history_frames, args.device
         )
         
         # 保存特征
-        save_path = os.path.join(args.output_dir, f"episode_spatial_features_with_history_{episode_id:06d}.pkl")
+        if args.save_history_features:
+            save_path = os.path.join(args.output_dir, f"episode_spatial_features_with_history_{episode_id:06d}.pkl")
+        else:
+            save_path = os.path.join(args.output_dir, f"episode_spatial_features_{episode_id:06d}.pkl")
         with open(save_path, 'wb') as f:
             pickle.dump(episode_features, f, protocol=pickle.HIGHEST_PROTOCOL)
         
         print(f"Episode {episode_id} 保存到: {save_path}")
         
-        # 🔥 额外：保存一些统计信息
-        total_history_frames = sum(len(f['history_info']['history_frames']) for f in episode_features['features'])
-        avg_history_frames = total_history_frames / len(episode_features['features']) if episode_features['features'] else 0
-        print(f"  平均历史帧数: {avg_history_frames:.1f}")
     
     print(f"✅ 带历史信息的特征提取完成！处理了 {len(episodes_dict)} 个episodes")
     print(f"🔥 重要提醒：现在每帧都包含历史帧信息，可以直接用于训练时的历史特征融合")
