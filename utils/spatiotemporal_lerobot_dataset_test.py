@@ -35,7 +35,8 @@ class LerobotPI0Dataset(Dataset):
         # 添加缓存逻辑
         
         cache_file = f".dataset_cache_{debug_episodes if debug_episodes is not None else 'all'}.pkl"
-        cache_path = os.path.abspath(cache_file)  # 获取绝对路径
+        #cache_path = os.path.abspath(cache_file)  # 获取绝对路径
+        cache_path = os.path.join(root, cache_file)  # 数据集目录下
 
         
         print(f"DEBUG: cache_file = {cache_file}")
@@ -172,7 +173,8 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
     def _load_spatial_features_index(self):
         """建立文件路径索引，确保排序"""
         debug_suffix = f"_{self.debug_episodes}" if self.debug_episodes is not None else "_all"
-        index_cache_file = f".spatial_index_cache{debug_suffix}.pkl"
+        #index_cache_file = f".spatial_index_cache{debug_suffix}.pkl"
+        index_cache_file = os.path.join(self.spatial_features_dir, f".spatial_index_cache{debug_suffix}.pkl")  # 数据集目录下
 
         if os.path.exists(index_cache_file):
             print(f"从缓存加载索引: {index_cache_file}")
@@ -224,7 +226,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
         #         episode_features = pickle.load(f)
         #         self.spatial_features_cache[episode_id] = episode_features
 
-        print(f"所有特征已加载到内存，共 {len(self.spatial_features_cache)} 个episodes")
+        #print(f"所有特征已加载到内存，共 {len(self.spatial_features_cache)} 个episodes")
     def _print_cache_validation(self):
         """打印缓存验证信息"""
         print("📋 缓存内容验证:")

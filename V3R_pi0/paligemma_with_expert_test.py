@@ -41,6 +41,7 @@ from .multimodal_spatial_encoder.builder import build_spatial_tower
 from .multimodal_fusion_block.builder import build_multimodal_fusion_block
 # from .multimodal_projector.builder import build_vision_projector
 from .history_buffer import UnlimitedHistoryBuffer
+from peft import PeftModel
 
 
 class PaliGemmaWithExpertConfig(PretrainedConfig):
@@ -286,8 +287,18 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             components_path = Path(components_path)
             lora_adapter_path = components_path / "lora_adapter"
             if lora_adapter_path.exists():
-                print("lora存在于指定路径")
-                self._merge_lora_adapter(lora_adapter_path)
+                try:
+                    language_model = self.paligemma.language_model
+                    # 直接加载，PEFT默认就是trainable的
+                    peft_model = PeftModel.from_pretrained(language_model, lora_adapter_path)
+                    self.paligemma.language_model = peft_model
+                    print(f"加载LoRA adapter用于继续训练: {lora_adapter_path}")
+                except Exception as e:
+                    print(f"LoRA加载失败: {e}")
+            # lora_adapter_path = components_path / "lora_adapter"
+            # if lora_adapter_path.exists():
+            #     print("lora存在于指定路径")
+            #     self._merge_lora_adapter(lora_adapter_path)
             modules_config = {
                 'fusion_block': {
                     'path': components_path / 'fusion_block.pth',
@@ -832,9 +843,13 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 #layer = models[i].layers[layer_idx]
                 # 修复：根据模型类型使用正确的访问路径
                 try:
-                    layer = models[i].model.layers[layer_idx]
+                    # PEFT 模型: PeftModel -> base_model.model (GemmaForCausalLM) -> model.layers
+                    layer = models[i].base_model.model.model.layers[layer_idx]
                 except:
-                    layer = models[i].layers[layer_idx]
+                    try:
+                        layer = models[i].model.layers[layer_idx]
+                    except:
+                        layer = models[i].layers[layer_idx]
                 hidden_states = layer.input_layernorm(hidden_states)
                 hidden_shape = (*hidden_states.shape[:-1], -1, layer.self_attn.head_dim)
 
@@ -875,9 +890,13 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 #layer = models[i].layers[layer_idx]
                 # 修复：根据模型类型使用正确的访问路径
                 try:
-                    layer = models[i].model.layers[layer_idx]
+                    # PEFT 模型: PeftModel -> base_model.model (GemmaForCausalLM) -> model.layers
+                    layer = models[i].base_model.model.model.layers[layer_idx]
                 except:
-                    layer = models[i].layers[layer_idx]
+                    try:
+                        layer = models[i].model.layers[layer_idx]
+                    except:
+                        layer = models[i].layers[layer_idx]
 
                 if hidden_states is not None:
                     end = start + hidden_states.shape[1]
@@ -898,20 +917,35 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                     outputs_embeds.append(out_emb)
 
                     start = end
+                    # 清理临时变量（不影响KV缓存）
+                    del after_first_residual
                 else:
                     outputs_embeds.append(None)
 
             inputs_embeds = outputs_embeds
+        
+            # 关键修复：只在训练模式下清理
+            # 推理模式(use_cache=True)时，query_states等可能还在被使用
+            #if not use_cache:  # 只在训练时清理
+                #del query_states, key_states, value_states, att_output
+                
+                # 每3层深度清理一次
+                #if layer_idx % 3 == 0 and torch.cuda.is_available():
+                    #torch.cuda.empty_cache()
 
         # final norm
         outputs_embeds = []
         for i, hidden_states in enumerate(inputs_embeds):
             if hidden_states is not None:
                 #out_emb = models[i].norm(hidden_states)
-                try:  # Model 0: GemmaForCausalLM
-                    out_emb = models[i].model.norm(hidden_states)
-                except:  # Model 1: GemmaModel
-                    out_emb = models[i].norm(hidden_states)
+                try:
+                    #穿透PEFT包装
+                    out_emb = models[i].base_model.model.model.norm(hidden_states)
+                except:
+                    try:  # Model 0: GemmaForCausalLM
+                        out_emb = models[i].model.norm(hidden_states)
+                    except:  # Model 1: GemmaModel
+                        out_emb = models[i].norm(hidden_states)
                 outputs_embeds.append(out_emb)
             else:
                 outputs_embeds.append(None)

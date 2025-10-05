@@ -52,7 +52,8 @@ from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.configs.policies import PreTrainedConfig
 from V3R_pi0.modeling_pi0_test import PI0Policy
 from utils.spatiotemporal_lerobot_dataset_test import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
-from peft import get_peft_model, LoraConfig, TaskType
+from peft import PeftModel,get_peft_model, LoraConfig, TaskType
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, OneCycleLR
 
 # 🎯 训练模式定义
 class TrainingMode:
@@ -161,8 +162,6 @@ class Lerobot_Trainer(L.LightningModule):
     
     def _setup_vlm_lora(self):
         """配置VLM的LoRA微调 (硬编码配置)"""
-        
-        
         paligemma_model = self.policy.model.paligemma_with_expert
         language_model = paligemma_model.paligemma.language_model
         
@@ -170,13 +169,17 @@ class Lerobot_Trainer(L.LightningModule):
         if (hasattr(language_model, 'peft_config') and 
             language_model.peft_config is not None and 
             len(language_model.peft_config) > 0):
-            print("  ✅ LoRA已配置，启用训练")
+            print(" LoRA已配置，启用训练")
             # 启用LoRA参数训练
-            for param in language_model.parameters():
-                if param.requires_grad:
-                    continue
-                param.requires_grad = True
-            return
+            for name, param in language_model.named_parameters():
+                if 'lora_' in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+            # 验证
+            lora_params = sum(p.numel() for n, p in language_model.named_parameters() 
+                            if p.requires_grad and 'lora_' in n)
+            print(f"LoRA参数: {lora_params:,} 可训练")
         
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -207,18 +210,20 @@ class Lerobot_Trainer(L.LightningModule):
         loss, loss_dict = self.policy(batch)
         
         # 记录损失
-        self.log('train_loss', loss, prog_bar=True, sync_dist=True)
+        self.log('train_loss', loss.detach(), prog_bar=True, sync_dist=True)
         
         for key, value in loss_dict.items():
             if isinstance(value, (int, float)):
                 self.log(f'train_{key}', value, sync_dist=True)
             elif isinstance(value, torch.Tensor):
-                if value.numel() == 1:
-                    self.log(f'train_{key}', value.item(), sync_dist=True)
+                detached_value = value.detach()
+                if detached_value.numel() == 1:
+                    self.log(f'train_{key}', detached_value.item(), sync_dist=True)
                 else:
-                    self.log(f'train_{key}', value.mean().item(), sync_dist=True)
+                    self.log(f'train_{key}', detached_value.mean().item(), sync_dist=True)
+
         return loss
-    
+      
     def configure_optimizers(self):
         """配置优化器 (复用原有逻辑，根据模式调整学习率)"""
         trainable_params = [p for p in self.policy.parameters() if p.requires_grad]
@@ -241,18 +246,28 @@ class Lerobot_Trainer(L.LightningModule):
             weight_decay=1e-2,
             eps=1e-6
         )
-        
-        # 学习率调度器 (复用原有逻辑)
         total_steps = self.trainer.estimated_stepping_batches
-        warmup_steps = int(0.05 * total_steps)
+        warmup_steps = int(total_steps * 0.05)  # 前5%用于warmup
         
-        from torch.optim.lr_scheduler import OneCycleLR
-        scheduler = OneCycleLR(
+        # 阶段1: Warmup (0 → lr)
+        warmup_scheduler = LinearLR(
             optimizer,
-            max_lr=lr,
-            total_steps=total_steps,
-            pct_start=warmup_steps/total_steps,
-            anneal_strategy='cos'
+            start_factor=0.001,
+            end_factor=1.0,
+            total_iters=warmup_steps
+        )
+        
+        # 阶段2: 余弦衰减 (lr → lr/10)
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=total_steps - warmup_steps,
+            eta_min=lr * 0.1  # 2.5e-6
+        )
+        
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps]
         )
         
         return {
