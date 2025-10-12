@@ -69,16 +69,25 @@ class Cut3rSpatialPreTrainedModel(PreTrainedModel):
         pass
 
 def prepare_input(pixel_values):
-    pixel_values = nn.functional.interpolate(pixel_values, size=(432, 432), mode='bilinear')
-    pixel_values = pixel_values.unsqueeze(1) ## FIXME: the second dimension is the number of frames in one batch
-    views = []
+    #pixel_values = nn.functional.interpolate(pixel_values, size=(432, 432), mode='bilinear')
+    #pixel_values = pixel_values.unsqueeze(1) ## FIXME: the second dimension is the number of frames in one batch
+    #views = []
     # Assuming pixel_values is (F_max, B, C, H, W)
-    if not isinstance(pixel_values, torch.Tensor) or pixel_values.ndim != 5:
-        raise ValueError(f"Expected pixel_values to be a 5D tensor (F, B, C, H, W), got {type(pixel_values)} with shape {getattr(pixel_values, 'shape', 'N/A')}")
-
+    #if not isinstance(pixel_values, torch.Tensor) or pixel_values.ndim != 5:
+        #raise ValueError(f"Expected pixel_values to be a 5D tensor (F, B, C, H, W), got {type(pixel_values)} with shape {getattr(pixel_values, 'shape', 'N/A')}")
+    if pixel_values.ndim != 5:
+        raise ValueError(f"Expected 5D tensor (F_max, B, C, H, W), got shape {pixel_values.shape}")
     F_max, B, C, H, W = pixel_values.shape
     device = pixel_values.device
+    # Reshape to (F_max*B, C, H, W) for batch interpolation
+    pixel_values_flat = pixel_values.reshape(F_max * B, C, H, W)
+    pixel_values_flat = nn.functional.interpolate(pixel_values_flat, size=(432, 432), mode='bilinear')
 
+    # Reshape back to (F_max, B, C, 432, 432)
+    pixel_values = pixel_values_flat.reshape(F_max, B, C, 432, 432)
+    F_max, B, C, H, W = pixel_values.shape
+    # 构建views (保持原有逻辑，从第84行开始)
+    views = []
     for i in range(F_max):
         current_frame_batch = pixel_values[i] # Shape (B, C, H, W)
         view = {
@@ -557,19 +566,29 @@ class Cut3rSpatialTower(nn.Module):
     def image_size(self):
         return self.config.image_size
     
-    def reset_state(self):
-        """🔥 新增：重置CUT3R内部状态"""
+    def reset_state(self, batch_size=1):
+        """
+        🔥 批次重置 CUT3R 内部状态
+        
+        Args:
+            batch_size: 需要重置的批次大小（即需要 spatial 的相机数量）
+        """
         if not self.is_loaded:
             print("⚠️  Spatial tower not loaded, cannot reset")
             return
-             #       print("🔄 执行CUT3R状态重置")
         
         # 创建虚拟输入
-        dummy_image = torch.zeros(1, 3, 224, 224, device=self.device, dtype=self.dtype)
+        dummy_image = torch.zeros(
+            batch_size, 3, 224, 224, 
+            device=self.device, 
+            dtype=self.dtype
+        )
         
-        # 🔥 核心：直接构造带reset=True的views
-        dummy_image_432 = torch.nn.functional.interpolate(dummy_image, size=(432, 432), mode='bilinear')
-        dummy_image_5d = dummy_image_432.unsqueeze(1)  # (1, 1, 3, 432, 432)
+        # 准备 views 结构
+        dummy_image_432 = torch.nn.functional.interpolate(
+            dummy_image, size=(432, 432), mode='bilinear'
+        )
+        dummy_image_5d = dummy_image_432.unsqueeze(1)  # (batch_size, 1, 3, 432, 432)
         
         F_max, B, C, H, W = dummy_image_5d.shape
         device = dummy_image.device
@@ -587,11 +606,11 @@ class Cut3rSpatialTower(nn.Module):
                 "img_mask": torch.tensor(True, device=device).expand(B),
                 "ray_mask": torch.tensor(False, device=device).expand(B),
                 "update": torch.tensor(True, device=device).expand(B),
-                "reset": torch.tensor(True, device=device).expand(B),  # 🔥 关键：强制重置
+                "reset": torch.tensor(True, device=device).expand(B),  # 🔥 强制重置
             }
             views.append(view)
         
-        # 直接调用encoder的内部逻辑来触发重置
+        # 执行重置逻辑
         with torch.no_grad():
             try:
                 encoder = self.spatial_tower.spatial_model.encoder
@@ -600,38 +619,32 @@ class Cut3rSpatialTower(nn.Module):
                 state_feat, state_pos = encoder.cut3r._init_state(feat[0], pos[0])
                 mem = encoder.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
                 init_state_feat = state_feat.clone()
-                init_mem = mem.clone()
                 
-                # 处理第一帧（带reset=True）来触发重置
                 feat_i = feat[0].to(dummy_image.dtype)
                 pos_i = pos[0]
                 
                 if encoder.cut3r.pose_head_flag:
                     global_img_feat_i = encoder.cut3r._get_img_level_feat(feat_i)
                     pose_feat_i = encoder.cut3r.pose_token.expand(feat_i.shape[0], -1, -1)
-                    pose_pos_i = -torch.ones(feat_i.shape[0], 1, 2, device=feat_i.device, dtype=pos_i.dtype)
+                    pose_pos_i = -torch.ones(
+                        feat_i.shape[0], 1, 2, 
+                        device=feat_i.device, 
+                        dtype=pos_i.dtype
+                    )
                 else:
                     pose_feat_i = None
                     pose_pos_i = None
                 
-                # 🔥 关键：这里会执行重置逻辑，因为views[0]["reset"]=True
+                # 🔥 执行重置（views[0]["reset"] 全为 True）
                 _ = encoder.cut3r._recurrent_rollout(
-                    state_feat,
-                    state_pos,
-                    feat_i,
-                    pos_i,
-                    pose_feat_i,
-                    pose_pos_i,
-                    init_state_feat,
+                    state_feat, state_pos, feat_i, pos_i,
+                    pose_feat_i, pose_pos_i, init_state_feat,
                     img_mask=views[0]["img_mask"],
-                    reset_mask=views[0]["reset"],  # True - 触发重置
+                    reset_mask=views[0]["reset"],  # (batch_size,) 全为 True
                     update=views[0].get("update", None),
                 )
                 
-#                print("✅ CUT3R状态重置完成")
-                
             except Exception as e:
-                print(f"⚠️  重置过程中出现错误: {e}")
-                # 降级方案：直接调用forward（可能不会重置，但至少不会报错）
+                print(f"⚠️  重置错误: {e}")
+                # 降级方案
                 _ = self.spatial_tower(dummy_image_432.squeeze(1))
-                print("✅ 使用降级方案")

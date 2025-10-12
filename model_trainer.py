@@ -53,7 +53,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from V3R_pi0.modeling_pi0_test import PI0Policy
 from utils.spatiotemporal_lerobot_dataset_test import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
 from peft import PeftModel,get_peft_model, LoraConfig, TaskType
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, OneCycleLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, OneCycleLR,CosineAnnealingWarmRestarts
 
 # 🎯 训练模式定义
 class TrainingMode:
@@ -270,6 +270,13 @@ class Lerobot_Trainer(L.LightningModule):
             milestones=[warmup_steps]
         )
         
+        #scheduler = CosineAnnealingWarmRestarts(
+        #    optimizer,
+        #    T_0=30000,        # 每30000步重启一次
+        #    T_mult=1,         # 固定周期长度
+        #    eta_min=lr * 0.1 # 最小学习率降到1%
+        #)
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {

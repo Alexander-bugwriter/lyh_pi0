@@ -42,10 +42,10 @@ class LerobotPI0Dataset(Dataset):
         print(f"DEBUG: cache_file = {cache_file}")
         print(f"DEBUG: cache_path = {cache_path}")
         print(f"DEBUG: 当前工作目录 = {os.getcwd()}")
-        print(f"DEBUG: 缓存文件是否存在 = {os.path.exists(cache_file)}")
-        if os.path.exists(cache_file):
-            print(f"从缓存加载: {cache_file}")
-            with open(cache_file, 'rb') as f:
+        print(f"DEBUG: 缓存文件是否存在 = {os.path.exists(cache_path)}")
+        if os.path.exists(cache_path):
+            print(f"从缓存加载: {cache_path}")
+            with open(cache_path, 'rb') as f:
                 cache_data = pickle.load(f)
                 self.dataset = cache_data['dataset']
                 self.normalizer = cache_data['normalizer']
@@ -139,6 +139,7 @@ class LerobotPI0Dataset(Dataset):
             ),
             "prompt": prompt,
             "episode_index": item["episode_index"],
+            "frame_index": item["frame_index"],
         }
     
 class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
@@ -315,8 +316,8 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             
             # if episode_id in self.spatial_features_cache:
             #     episode_features = self.spatial_features_cache[episode_id]
-            if episode_id in self.spatial_features_cache:
-                file_path = self.spatial_file_index[episode_id]  # 现在这里是路径
+            if episode_id in self.spatial_files_index:
+                file_path = self.spatial_files_index[episode_id]  # 现在这里是路径
                 # 🔥 按需加载
                 with open(file_path, 'rb') as f:
                     episode_features = pickle.load(f)

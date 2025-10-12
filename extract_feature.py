@@ -17,97 +17,97 @@ from torchvision.transforms.v2 import Resize
 # 你的项目导入
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from V3R_pi0.multimodal_spatial_encoder.cut3r_spatial_encoder import Cut3rSpatialTower, Cut3rSpatialConfig
+from utils.spatiotemporal_lerobot_dataset_test import LerobotPI0Dataset
+
+# def load_dataset_with_normalizer(repo_id, root, image_size=224, action_horizon=50, debug_episodes=None):
+#     """加载LeRobot数据集并设置归一化器"""
+#     print(f"加载数据集: {repo_id or root}")
+    
+#     episodes = None
+#     if debug_episodes:
+#         episodes = list(range(debug_episodes))
+#         print(f"调试模式：只加载前 {debug_episodes} 个episodes")
+    
+#     image_transforms = Resize((image_size, image_size))
+#     info = get_dataset_info(root if root else repo_id)
+#     delta_timestamps = generate_delta_timestamps(info['fps'], info['features'], action_horizon)
+    
+#     dataset = LeRobotDataset(
+#         repo_id=repo_id,
+#         root=root,
+#         image_transforms=image_transforms,
+#         delta_timestamps=delta_timestamps,
+#         episodes=episodes
+#     )
+    
+#     print(f"数据集加载成功，共 {len(dataset)} 条数据")
+    
+#     # 🔥 关键：创建归一化器，与训练时保持一致
+#     normalizer = Normalizer(
+#         norm_stats=dataset.meta.stats,
+#         norm_type={
+#             "image": "identity",
+#             "wrist_image": "identity", 
+#             "state": "meanstd",
+#             "actions": "meanstd",
+#         }
+#     )
+#     print("归一化器设置完成")
+    
+#     return dataset, normalizer
 
 
-def load_dataset_with_normalizer(repo_id, root, image_size=224, action_horizon=50, debug_episodes=None):
-    """加载LeRobot数据集并设置归一化器"""
-    print(f"加载数据集: {repo_id or root}")
+# def normalize_and_prepare_images(item, normalizer):
+#     """
+#     🔥 关键函数：应用与训练时完全相同的图像预处理流程
+#     模拟 LerobotPI0Dataset.__getitem__ 中的图像处理逻辑
+#     """
+#     # 1. 先归一化原始数据
+#     normalized_item = normalizer.normalize(item)
     
-    episodes = None
-    if debug_episodes:
-        episodes = list(range(debug_episodes))
-        print(f"调试模式：只加载前 {debug_episodes} 个episodes")
+#     # 2. 处理图像，转换为uint8格式
+#     images = {}
     
-    image_transforms = Resize((image_size, image_size))
-    info = get_dataset_info(root if root else repo_id)
-    delta_timestamps = generate_delta_timestamps(info['fps'], info['features'], action_horizon)
+#     # 基础相机 (必需)
+#     if "image" in normalized_item:
+#         base_image = normalized_item["image"]
+#         while base_image.dim() > 3 and 1 in base_image.shape:
+#             base_image = base_image.squeeze()
+#         base_image = (base_image * 255).to(torch.uint8)  # 🔥 关键：转换为uint8
+#         images["base_0_rgb"] = base_image
     
-    dataset = LeRobotDataset(
-        repo_id=repo_id,
-        root=root,
-        image_transforms=image_transforms,
-        delta_timestamps=delta_timestamps,
-        episodes=episodes
-    )
+#     # 手腕相机 (可选)
+#     if "wrist_image" in normalized_item:
+#         wrist_image = normalized_item["wrist_image"]
+#         while wrist_image.dim() > 3 and 1 in wrist_image.shape:
+#             wrist_image = wrist_image.squeeze()
+#         wrist_image = (wrist_image * 255).to(torch.uint8)  # 🔥 关键：转换为uint8
+#         images["left_wrist_0_rgb"] = wrist_image
     
-    print(f"数据集加载成功，共 {len(dataset)} 条数据")
-    
-    # 🔥 关键：创建归一化器，与训练时保持一致
-    normalizer = Normalizer(
-        norm_stats=dataset.meta.stats,
-        norm_type={
-            "image": "identity",
-            "wrist_image": "identity", 
-            "state": "meanstd",
-            "actions": "meanstd",
-        }
-    )
-    print("归一化器设置完成")
-    
-    return dataset, normalizer
+#     return images
 
 
-def normalize_and_prepare_images(item, normalizer):
-    """
-    🔥 关键函数：应用与训练时完全相同的图像预处理流程
-    模拟 LerobotPI0Dataset.__getitem__ 中的图像处理逻辑
-    """
-    # 1. 先归一化原始数据
-    normalized_item = normalizer.normalize(item)
+# def apply_model_image_preprocessing(images, device='cuda:0'):
+#     """
+#     🔥 应用与模型 prepare_images 方法完全相同的预处理
+#     将uint8图像归一化到[-1, 1]范围
+#     """
+#     processed_images = []
+#     IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
     
-    # 2. 处理图像，转换为uint8格式
-    images = {}
+#     for key in IMAGE_KEYS:
+#         if key in images:
+#             img = images[key].to(device=device, dtype=torch.float32)
+#             # 🔥 关键：应用与模型相同的归一化 img.to(dtype) / 127.5 - 1.0
+#             img = img / 127.5 - 1.0  # 归一化到[-1, 1]
+#             processed_images.append(img)
+#         else:
+#             # 如果某个相机不存在，创建零填充
+#             if len(processed_images) > 0:
+#                 dummy_img = torch.full_like(processed_images[0], fill_value=-1.0)
+#                 processed_images.append(dummy_img)
     
-    # 基础相机 (必需)
-    if "image" in normalized_item:
-        base_image = normalized_item["image"]
-        while base_image.dim() > 3 and 1 in base_image.shape:
-            base_image = base_image.squeeze()
-        base_image = (base_image * 255).to(torch.uint8)  # 🔥 关键：转换为uint8
-        images["base_0_rgb"] = base_image
-    
-    # 手腕相机 (可选)
-    if "wrist_image" in normalized_item:
-        wrist_image = normalized_item["wrist_image"]
-        while wrist_image.dim() > 3 and 1 in wrist_image.shape:
-            wrist_image = wrist_image.squeeze()
-        wrist_image = (wrist_image * 255).to(torch.uint8)  # 🔥 关键：转换为uint8
-        images["left_wrist_0_rgb"] = wrist_image
-    
-    return images
-
-
-def apply_model_image_preprocessing(images, device='cuda:0'):
-    """
-    🔥 应用与模型 prepare_images 方法完全相同的预处理
-    将uint8图像归一化到[-1, 1]范围
-    """
-    processed_images = []
-    IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
-    
-    for key in IMAGE_KEYS:
-        if key in images:
-            img = images[key].to(device=device, dtype=torch.float32)
-            # 🔥 关键：应用与模型相同的归一化 img.to(dtype) / 127.5 - 1.0
-            img = img / 127.5 - 1.0  # 归一化到[-1, 1]
-            processed_images.append(img)
-        else:
-            # 如果某个相机不存在，创建零填充
-            if len(processed_images) > 0:
-                dummy_img = torch.full_like(processed_images[0], fill_value=-1.0)
-                processed_images.append(dummy_img)
-    
-    return processed_images
+#     return processed_images
 
 
 def group_by_episode(dataset):
@@ -119,7 +119,7 @@ def group_by_episode(dataset):
     for idx in tqdm(range(len(dataset)), desc="分组数据"):
         item = dataset[idx]
         episode_idx = item['episode_index'].item()
-        episodes[episode_idx].append((idx, item))  # 🔥 保存原始索引
+        episodes[episode_idx].append((idx, item))  # 保存原始索引
     
     # 按frame_index排序每个episode
     for episode_idx in episodes:
@@ -189,14 +189,14 @@ class HistoryBuffer:
         self.buffer.clear()
 
 
-def extract_episode_features_with_history(spatial_tower, episode_data, episode_id, normalizer, save_history,
+def extract_episode_features_with_history(spatial_tower, episode_data, episode_id,dataset, save_history,
                                         max_history_frames=5, device='cuda:0'):
     """提取单个episode的特征 - 包含历史信息"""
     print(f"处理Episode {episode_id}: {len(episode_data)} 帧 ")
     
     # 重置CUT3R状态
     if hasattr(spatial_tower, 'reset_state'):
-        spatial_tower.reset_state()
+        spatial_tower.reset_state(batch_size=2)  # 🔥 批次重置
     
     # 创建历史缓存管理器
     history_buffer = HistoryBuffer(max_history_frames) if save_history else None
@@ -210,26 +210,36 @@ def extract_episode_features_with_history(spatial_tower, episode_data, episode_i
     
     with torch.no_grad():
         for frame_idx, (dataset_idx, frame_data) in enumerate(tqdm(episode_data, desc=f"Episode {episode_id}")):
-            
             current_frame_index = frame_data['frame_index'].item()
             
-            # 🔥 关键步骤1：应用与训练时相同的归一化和图像预处理
-            images_dict = normalize_and_prepare_images(frame_data, normalizer)
+            # 🔥 使用 LerobotPI0Dataset 的预处理（返回 uint8 [0, 255]）
+            processed_item = dataset[dataset_idx]
+            images_dict = processed_item["image"]  # uint8 [0, 255]
             
-            # 🔥 关键步骤2：应用与模型相同的图像预处理（归一化到[-1,1]）
-            processed_images = apply_model_image_preprocessing(images_dict, device)
+            # 🔥 归一化到 [-1, 1]
+            base_image_uint8 = images_dict["base_0_rgb"]  # (C, H, W) uint8
+            base_image = base_image_uint8.to(device=device, dtype=torch.float32)
+            base_image = (base_image / 127.5) - 1.0  # [-1, 1]
             
-            # 🔥 关键步骤3：确保CUT3R接收到正确格式的图像
-            if len(processed_images) >= 1:
-                base_image = processed_images[0].to(device=device, dtype=torch.float16)
-                wrist_image = processed_images[1].to(device=device, dtype=torch.float16) if len(processed_images) > 1 else base_image
-            else:
-                print(f"警告：Episode {episode_id} frame {current_frame_index} 缺少图像数据")
-                continue
+            wrist_image_uint8 = images_dict["left_wrist_0_rgb"]
+            wrist_image = wrist_image_uint8.to(device=device, dtype=torch.float32)
+            wrist_image = (wrist_image / 127.5) - 1.0  # [-1, 1]            
+            # 🔥 拼接：(C,H,W) -> (1,1,C,H,W) base + (1,1,C,H,W) wrist -> (1,2,C,H,W)
+            # F_max=1, B=2
+            base_image = base_image.unsqueeze(0).unsqueeze(0)  # (1, 1, C, H, W)
+            wrist_image = wrist_image.unsqueeze(0).unsqueeze(0)  # (1, 1, C, H, W)
+            spatial_batch = torch.cat([base_image, wrist_image], dim=1)  # (1, 2, C, H, W)
             
-            # 🔥 按顺序通过CUT3R提取特征
-            base_camera_tokens, base_patch_tokens = spatial_tower(base_image.unsqueeze(0))
-            wrist_camera_tokens, wrist_patch_tokens = spatial_tower(wrist_image.unsqueeze(0))
+            # 🔥 调用 CUT3R（期望 (F_max, B, C, H, W) 格式）
+            camera_tokens, patch_tokens = spatial_tower(spatial_batch)
+            # camera_tokens: (2, 1, 768) - B=2 个相机
+            # patch_tokens: (2, 729, 768)
+            
+            # 🔥 在 B 维度切分
+            base_camera_tokens = camera_tokens[0:1]      # (1, 1, 768)
+            base_patch_tokens = patch_tokens[0:1]        # (1, 729, 768)
+            wrist_camera_tokens = camera_tokens[1:2]     # (1, 1, 768)
+            wrist_patch_tokens = patch_tokens[1:2]       # (1, 729, 768)
             
             # 🔥 简化：只有启用历史特征时才获取历史信息
             history_info = None
@@ -246,7 +256,7 @@ def extract_episode_features_with_history(spatial_tower, episode_data, episode_i
                 # 基本信息
                 'frame_index': current_frame_index,
                 'episode_index': frame_data['episode_index'].item(),
-                'timestamp': frame_data['timestamp'].item(),
+                #'timestamp': frame_data['timestamp'].item(),
                 'dataset_idx': dataset_idx,
                 
                 # 🔥 当前帧的spatial tokens
@@ -284,34 +294,24 @@ def extract_episode_features_with_history(spatial_tower, episode_data, episode_i
     return episode_features
 
 
-def validate_preprocessing_with_history(dataset, normalizer, device='cuda:0'):
-    """验证预处理流程的正确性（包含历史信息检查）"""
-    print("🔍 验证预处理流程（包含历史信息）...")
+def validate_preprocessing_with_history(dataset, device='cuda:0'):
+    """验证预处理流程的正确性"""
+    print("🔍 验证预处理流程...")
     
-    # 取一个样本进行验证
     sample_item = dataset[0]
     
-    print("原始数据范围:")
+    print("LerobotPI0Dataset 输出:")
     if "image" in sample_item:
-        img = sample_item["image"]
-        wrist_img = sample_item.get("wrist_image")
-        print(f"  image: min={img.min():.3f}, max={img.max():.3f}, shape={img.shape}, dtype={img.dtype}")
-        if wrist_img is not None:
-            print(f"  wrist_image: min={wrist_img.min():.3f}, max={wrist_img.max():.3f}, shape={wrist_img.shape}, dtype={wrist_img.dtype}")
+        for key, img in sample_item["image"].items():
+            print(f"  {key}: shape={img.shape}, dtype={img.dtype}, min={img.min()}, max={img.max()}")
     
-    # 应用归一化
-    images_dict = normalize_and_prepare_images(sample_item, normalizer)
-    print("归一化后 (uint8):")
-    for key, img in images_dict.items():
-        print(f"  {key}: min={img.min()}, max={img.max()}, shape={img.shape}, dtype={img.dtype}")
+    print("\n归一化到 [-1, 1]:")
+    base_image_uint8 = sample_item["image"]["base_0_rgb"]
+    base_image_normalized = (base_image_uint8.to(device=device, dtype=torch.float32) / 127.5) - 1.0
+    print(f"  归一化后: min={base_image_normalized.min():.3f}, max={base_image_normalized.max():.3f}")
+    print(f"  shape={base_image_normalized.shape}, dtype={base_image_normalized.dtype}")
     
-    # 应用模型预处理
-    processed_images = apply_model_image_preprocessing(images_dict, device)
-    print("模型预处理后 ([-1,1]):")
-    for i, img in enumerate(processed_images):
-        print(f"  image_{i}: min={img.min():.3f}, max={img.max():.3f}, shape={img.shape}, dtype={img.dtype}")
-    
-    print("✅ 预处理验证完成")
+    print("\n✅ 预处理验证完成")
 
 
 def test_history_buffer():
@@ -337,6 +337,44 @@ def test_history_buffer():
     
     print("✅ 历史缓存测试完成")
 
+def verify_episode_file(filepath):
+    """验证pkl文件是否完整"""
+    try:
+        with open(filepath, 'rb') as f:
+            data = pickle.load(f)
+        return 'episode_id' in data and 'features' in data and len(data['features']) > 0
+    except:
+        return False
+
+
+def get_processed_episodes(output_dir, save_history):
+    """获取已处理且完整的episode列表"""
+    if not os.path.exists(output_dir):
+        return set()
+    
+    processed = set()
+    prefix = "episode_spatial_features_with_history_" if save_history else "episode_spatial_features_"
+    
+    for filename in os.listdir(output_dir):
+        if filename.startswith(prefix) and filename.endswith(".pkl"):
+            try:
+                episode_id = int(filename.split("_")[-1].replace(".pkl", ""))
+                filepath = os.path.join(output_dir, filename)
+                if verify_episode_file(filepath):
+                    processed.add(episode_id)
+            except:
+                continue
+    
+    return processed    
+def reserve_gpu_memory(device, fraction=0.8):
+    """预留指定比例的GPU显存"""
+    if not torch.cuda.is_available():
+        return None
+    device_id = int(device.split(':')[1]) if ':' in device else 0
+    total_memory = torch.cuda.get_device_properties(device_id).total_memory
+    reserve_size = int(total_memory * fraction / 4)
+    print(f"预留 {fraction*100}% GPU显存 (~{reserve_size*4/1024**3:.2f} GB)")
+    return torch.empty(reserve_size, dtype=torch.float32, device=device)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -366,7 +404,7 @@ def main():
                        help="测试历史缓存功能")
     
     args = parser.parse_args()
-    
+    gpu_memory_holder = reserve_gpu_memory(args.device, fraction=0.4)
     print("LeRobot CUT3R特征预提取（包含历史信息）")
     print(f"输出目录: {args.output_dir}")
     if args.save_history_features:
@@ -380,21 +418,32 @@ def main():
         return
     
     # 🔥 关键：加载数据集和归一化器
-    dataset, normalizer = load_dataset_with_normalizer(
-        args.data_repo_id, 
-        args.data_root, 
-        args.image_size, 
-        args.action_horizon, 
-        args.debug_episodes
+    # dataset, normalizer = load_dataset_with_normalizer(
+    #     args.data_repo_id, 
+    #     args.data_root, 
+    #     args.image_size, 
+    #     args.action_horizon, 
+    #     args.debug_episodes
+    # )
+    dataset = LerobotPI0Dataset(
+        repo_id=args.data_repo_id,
+        root=args.data_root,
+        image_size=args.image_size,
+        action_horizon=args.action_horizon,
+        dataset_fps=10.0,
+        debug_episodes=args.debug_episodes
     )
+    
+    print(f"数据集加载成功，共 {len(dataset)} 条数据")
     
     # 可选：验证预处理流程
     if args.validate_preprocessing:
-        validate_preprocessing_with_history(dataset, normalizer, args.device)
-    
+        validate_preprocessing_with_history(dataset, args.device)
     # 按episode分组
     episodes_dict = group_by_episode(dataset)
-    
+    processed = get_processed_episodes(args.output_dir, args.save_history_features)
+    if processed:
+        print(f"已处理: {len(processed)} 个episodes (已验证完整性)")
     # 初始化CUT3R
     spatial_tower = init_cut3r(args.cut3r_weights_path, args.device)
     
@@ -403,9 +452,11 @@ def main():
     
     # 处理每个episode
     for episode_id, episode_data in episodes_dict.items():
+        if episode_id in processed:
+            continue
         # 🔥 关键：提取包含历史信息的特征
         episode_features = extract_episode_features_with_history(
-            spatial_tower, episode_data, episode_id, normalizer,args.save_history_features, 
+            spatial_tower, episode_data, episode_id, dataset, args.save_history_features,
             args.max_history_frames, args.device
         )
         

@@ -458,74 +458,184 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         print(f"可能的单图像方法: {single_image_methods}")
     
 
+    # def embed_image(self, image: torch.Tensor):
+    #     """
+    #     🔥 核心方法：选择性空间编码
+        
+    #     Args:
+    #         image: (B, N, C, H, W) 输入图像，N对应IMAGE_KEYS的顺序
+        
+    #     Returns:
+    #         enhanced_features: (B, N, L, D) 增强后的特征
+    #     """
+    #     batch_size, num_images = image.shape[:2]
+    #     IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+        
+    #     enhanced_features_list = []
+        
+    #     for img_idx in range(num_images):
+    #         #print("embed_image里的图像尺寸：", image[:, img_idx].shape)
+    #         current_img = image[:, img_idx]  # (B, C, H, W)
+    #         camera_key = IMAGE_KEYS[img_idx] if img_idx < len(IMAGE_KEYS) else f"camera_{img_idx}"
+            
+    #         # 🔥 根据配置决定是否使用空间编码
+    #         needs_spatial = (
+    #             self.config.use_spatial_encoder 
+    #             and self.spatial_tower is not None
+    #             and self.config.spatial_camera_config.get(camera_key, False)
+    #         )
+    #         # 🔥 根据config判断是否使用历史特征
+    #         needs_history = (
+    #             self.config.use_history_features
+    #             and self.history_buffer is not None
+    #             and self.config.history_camera_config.get(camera_key, False)
+    #         )
+            
+    #         if needs_spatial:
+    #             # 🔥 使用CUT3R空间编码（CUT3R内部自动管理历史状态）
+    #             # enhanced_features = self._encode_with_cut3r(current_img)
+    #             #print(f"✅ {camera_key}: 使用CUT3R空间编码")
+    #             vision_outputs = self.paligemma.vision_tower(image)
+    #             raw_vision_features = vision_outputs.last_hidden_state  # (B, L, 1152)
+                
+    #             # 2. 🔥 关键：直接调用CUT3R，它内部会自动更新和利用历史状态
+    #             with torch.no_grad():
+    #                 image_fp16 = image.half()
+    #                 camera_tokens, patch_tokens = self.spatial_tower(image_fp16)
+    #                 camera_tokens = camera_tokens.to(raw_vision_features.dtype)
+    #                 patch_tokens = patch_tokens.to(raw_vision_features.dtype)
+
+    #             spatial_features = [{"camera_tokens": camera_tokens, "patch_tokens": patch_tokens}]
+    #             enhanced_features=self.fuse_2D_with_cut3r(raw_vision_features,spatial_features)
+    #         else:
+    #             # 标准PaliGemma处理
+    #             enhanced_features = self.paligemma.get_image_features(current_img)
+    #             #print(f"📷 {camera_key}: 使用标准PaliGemma")
+
+    #         # 🔥 历史特征处理
+    #         if needs_history:
+    #             final_features = self.history_buffer.get_enhanced_features_with_separators(
+    #                 current_features=enhanced_features,separator_token=self.spatial_separator_token,max_frame_num=self.num_sampled_history_frames
+    #             )
+    #             self.history_buffer.append(enhanced_features, self.spatial_separator_token)
+    #             #print(f"   📁 {camera_key} 启用历史特征增强")
+    #         else:
+    #             final_features = enhanced_features
+    #             #print(f"   ⚡ {camera_key} 仅使用当前帧")
+        
+    #         enhanced_features_list.append(final_features)
+
+    #     return enhanced_features_list
     def embed_image(self, image: torch.Tensor):
         """
-        🔥 核心方法：选择性空间编码
+        批次处理版本
         
         Args:
-            image: (B, N, C, H, W) 输入图像，N对应IMAGE_KEYS的顺序
+            image: (B, N, C, H, W) - N=3 对应 [base, left_wrist, right_wrist]
         
         Returns:
-            enhanced_features: (B, N, L, D) 增强后的特征
+            enhanced_features_list: List[(B, L, D)]
         """
-        batch_size, num_images = image.shape[:2]
+        batch_size = image.shape[0]
         IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
         
-        enhanced_features_list = []
+        # 根据配置决定哪些要用 spatial
+        spatial_config = self.config.spatial_camera_config
+        spatial_mask = [spatial_config.get(key, False) for key in IMAGE_KEYS]
         
-        for img_idx in range(num_images):
-            #print("embed_image里的图像尺寸：", image[:, img_idx].shape)
-            current_img = image[:, img_idx]  # (B, C, H, W)
-            camera_key = IMAGE_KEYS[img_idx] if img_idx < len(IMAGE_KEYS) else f"camera_{img_idx}"
-            
-            # 🔥 根据配置决定是否使用空间编码
-            needs_spatial = (
-                self.config.use_spatial_encoder 
-                and self.spatial_tower is not None
-                and self.config.spatial_camera_config.get(camera_key, False)
-            )
-            # 🔥 根据config判断是否使用历史特征
-            needs_history = (
-                self.config.use_history_features
-                and self.history_buffer is not None
-                and self.config.history_camera_config.get(camera_key, False)
-            )
-            
-            if needs_spatial:
-                # 🔥 使用CUT3R空间编码（CUT3R内部自动管理历史状态）
-                # enhanced_features = self._encode_with_cut3r(current_img)
-                #print(f"✅ {camera_key}: 使用CUT3R空间编码")
-                vision_outputs = self.paligemma.vision_tower(image)
-                raw_vision_features = vision_outputs.last_hidden_state  # (B, L, 1152)
+        # === 批次处理需要 spatial 的相机 ===
+        spatial_indices = [i for i, use_spatial in enumerate(spatial_mask) if use_spatial]
+        
+        if spatial_indices:
+            # # 提取需要 spatial 的图像
+            # spatial_images = torch.stack([image[:, i] for i in spatial_indices], dim=0)
+            # # (N_spatial, B, C, H, W) -> (N_spatial*B, C, H, W)
+            # spatial_images_flat = spatial_images.reshape(-1, *spatial_images.shape[2:])
+            # 🔥 简单：直接按顺序提取需要 spatial 的相机图像
+            spatial_images_list = [image[:, i] for i in spatial_indices]  # List of (1, C, H, W)
+            spatial_batch = torch.stack(spatial_images_list, dim=1)  # (1, num_spatial, C, H, W)
                 
-                # 2. 🔥 关键：直接调用CUT3R，它内部会自动更新和利用历史状态
-                with torch.no_grad():
-                    image_fp16 = image.half()
-                    camera_tokens, patch_tokens = self.spatial_tower(image_fp16)
-                    camera_tokens = camera_tokens.to(raw_vision_features.dtype)
-                    patch_tokens = patch_tokens.to(raw_vision_features.dtype)
-
-                spatial_features = [{"camera_tokens": camera_tokens, "patch_tokens": patch_tokens}]
-                enhanced_features=self.fuse_2D_with_cut3r(raw_vision_features,spatial_features)
-            else:
-                # 标准PaliGemma处理
-                enhanced_features = self.paligemma.get_image_features(current_img)
-                #print(f"📷 {camera_key}: 使用标准PaliGemma")
-
-            # 🔥 历史特征处理
-            if needs_history:
-                final_features = self.history_buffer.get_enhanced_features_with_separators(
-                    current_features=enhanced_features,separator_token=self.spatial_separator_token,max_frame_num=self.num_sampled_history_frames
-                )
-                self.history_buffer.append(enhanced_features, self.spatial_separator_token)
-                #print(f"   📁 {camera_key} 启用历史特征增强")
-            else:
-                final_features = enhanced_features
-                #print(f"   ⚡ {camera_key} 仅使用当前帧")
+            spatial_flat = spatial_batch.squeeze(0)  # (num_spatial, C, H, W)
+            vision_outputs = self.paligemma.vision_tower(spatial_flat)
+            raw_features = vision_outputs.last_hidden_state  # (num_spatial, L, 1152)
+            
+            # 调用 CUT3R
+            with torch.no_grad():
+                camera_tokens, patch_tokens = self.spatial_tower(spatial_batch.half())
+                camera_tokens = camera_tokens.to(raw_features.dtype)
+                patch_tokens = patch_tokens.to(raw_features.dtype)
+            
+            # 融合
+            spatial_tokens = {'camera_tokens': camera_tokens, 'patch_tokens': patch_tokens}
+            spatial_enhanced = self.fuse_2D_with_cut3r(raw_features, spatial_tokens)
+            
+            # Reshape 回 (N_spatial, B, L, D)
+            # spatial_enhanced = spatial_enhanced.reshape(
+            #     len(spatial_indices), batch_size, *spatial_enhanced.shape[1:]
+            # )
+        # === 组装最终结果 ===
+        enhanced_features_list = []
+        spatial_idx = 0
         
+        for i, camera_key in enumerate(IMAGE_KEYS):
+            if spatial_mask[i]:
+                # 用 spatial 处理的
+                current_enhanced = spatial_enhanced[spatial_idx:spatial_idx+1]  # (1, L, D)
+                spatial_idx += 1
+            else:
+                # 标准处理
+                current_enhanced = self.paligemma.get_image_features(image[:, i])
+            
+            # 历史特征拼接
+            history_config = self.config.history_camera_config
+            if (self.config.use_history_features and 
+                self.history_buffer is not None and 
+                history_config.get(camera_key, False)):
+                
+                final_features = self.history_buffer.get_enhanced_features_with_separators(
+                    current_features=current_enhanced,
+                    separator_token=self.spatial_separator_token,
+                    max_frame_num=self.config.num_sampled_history_frames
+                )
+                self.history_buffer.append(current_enhanced, self.spatial_separator_token)
+            else:
+                final_features = current_enhanced
+            
             enhanced_features_list.append(final_features)
-
+        
         return enhanced_features_list
+        
+        # # === 组装最终结果 ===
+        # enhanced_features_list = []
+        # spatial_idx = 0
+        
+        # for i, camera_key in enumerate(IMAGE_KEYS):
+        #     if spatial_mask[i]:
+        #         # 用 spatial 处理的
+        #         current_enhanced = spatial_enhanced[spatial_idx]
+        #         spatial_idx += 1
+        #     else:
+        #         # 标准处理
+        #         current_enhanced = self.paligemma.get_image_features(image[:, i])
+            
+        #     # 历史特征拼接
+        #     history_config = self.config.history_camera_config
+        #     if (self.config.use_history_features and 
+        #         self.history_buffer is not None and 
+        #         history_config.get(camera_key, False)):
+                
+        #         final_features = self.history_buffer.get_enhanced_features_with_separators(
+        #             current_features=current_enhanced,
+        #             separator_token=self.spatial_separator_token,
+        #             max_frame_num=self.config.num_sampled_history_frames
+        #         )
+        #         self.history_buffer.append(current_enhanced, self.spatial_separator_token)
+        #     else:
+        #         final_features = current_enhanced
+            
+        #     enhanced_features_list.append(final_features)
+        
+        # return enhanced_features_list
     
 
     def embed_image_with_preprocessing_feature(self, image: torch.Tensor, 
@@ -651,7 +761,9 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         if hasattr(self, 'spatial_tower') and self.spatial_tower is not None:
             # 🔥 直接调用spatial_tower的reset方法
             if hasattr(self.spatial_tower, 'reset_state'):
-                self.spatial_tower.reset_state()
+                spatial_config = self.config.spatial_camera_config
+                num_spatial = sum(spatial_config.values())
+                self.spatial_tower.reset_state(batch_size=num_spatial)
                 # print("CUT3R is reset")
             else:
                 print("警告：spatial_tower没有重置方法")
@@ -660,7 +772,8 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         # 重置历史缓存（如果使用的话）
         if hasattr(self, 'history_buffer') and self.history_buffer:
             self.history_buffer.clear()
-            # print("History buffer cleared.")
+            print("History buffer cleared.")
+        
 
     
               
