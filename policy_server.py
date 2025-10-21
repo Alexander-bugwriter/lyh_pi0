@@ -2,6 +2,38 @@
 """
 VLA服务器脚本 - 通过WebSocket提供端到端推理服务
 """
+import os
+import sys
+
+# 🔥 关键: 在所有导入之前就修复设备检测函数
+def setup_device_patch():
+    """修复设备检测函数 - 必须在导入lerobot之前调用"""
+    def patched_is_torch_device_available(device: str) -> bool:
+        import torch
+        
+        if ":" in device:
+            device_type = device.split(":")[0]
+        else:
+            device_type = device
+        
+        try_device = device_type.lower()
+        
+        if try_device == "cuda":
+            return torch.cuda.is_available()
+        elif try_device == "mps":
+            return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        elif try_device == "cpu":
+            return True
+        else:
+            raise ValueError(f"Unknown device {try_device}")
+    
+    # 🔥 立即应用补丁
+    import lerobot.common.utils.utils
+    lerobot.common.utils.utils.is_torch_device_available = patched_is_torch_device_available
+    print("设备检测函数已修复")
+
+# 🔥 在这里立即调用,在导入其他模块之前
+setup_device_patch()
 
 import os
 import time
@@ -39,30 +71,6 @@ def load_normalization_stats():
         'action_mean': np.array(norm_stats["norm_stats"]["actions"]["mean"][:7], dtype=np.float32),
         'action_std': np.array(norm_stats["norm_stats"]["actions"]["std"][:7], dtype=np.float32)
     }
-def setup_device_patch():
-    """修复设备检测函数"""
-    def patched_is_torch_device_available(device: str) -> bool:
-        if ":" in device:
-            device_type = device.split(":")[0]
-        else:
-            device_type = device
-        
-        try_device = device_type.lower()
-        
-        if try_device == "cuda":
-            return torch.cuda.is_available()
-        elif try_device == "mps":
-            return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-        elif try_device == "cpu":
-            return True
-        else:
-            raise ValueError(f"Unknown device {try_device}")
-    
-    import lerobot.common.utils.utils
-    lerobot.common.utils.utils.is_torch_device_available = patched_is_torch_device_available
-
-
-
 def convert_observation(raw_data: dict, device, norm_stats) -> dict:
     """
     转换原始数据为模型期望的格式
@@ -127,9 +135,46 @@ def run_server(host="0.0.0.0", port=8000, model_type="pi0"):
     
     # 加载模型
     # policy = PI0Policy.from_pretrained()
+    config_path = Path(args.base_model_path) / "config.json"
+
+    if config_path.exists():
+        print(f"检查并修复config文件: {config_path}")
+
+        # 读取原始config
+        with open(config_path, 'r') as f:
+            config_dict = json.load(f)
+
+        # 移除训练特定字段
+        fields_to_remove = ['training_mode', 'pretrained_path']
+        removed_fields = []
+
+        for field in fields_to_remove:
+            if field in config_dict:
+                config_dict.pop(field)
+                removed_fields.append(field)
+
+        if removed_fields:
+            print(f"移除非标准字段: {removed_fields}")
+
+            # 备份原文件
+            backup_path = config_path.with_suffix('.json.backup')
+            if not backup_path.exists():
+                import shutil
+                shutil.copy(config_path, backup_path)
+                print(f"原文件已备份到: {backup_path}")
+
+            # 写回修复后的config
+            with open(config_path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+            print(f"config.json 已修复")
+
+    # 现在可以正常加载了
+    print("📂 加载基础模型...")
     config = PreTrainedConfig.from_pretrained(args.base_model_path)
+    
+
     if args.use_history_features:
-        history_camera_config = {"base_0_rgb": True, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
+        history_camera_config = {"base_0_rgb": True, "left_wrist_0_rgb": True, "right_wrist_0_rgb": False}
     else:
         history_camera_config = {"base_0_rgb": False, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
     policy = PI0Policy(
@@ -230,9 +275,9 @@ if __name__ == "__main__":
                        help="历史帧采样数量")
     
     parser.add_argument("--base_model_path", type=str, required=True,
-                       help="模型路径")
+                       help="基座模型路径")
     parser.add_argument("--components_path", type=str, default=None,
-                       help="组件加载路径 (用于加载预训练的fusion组件)")
+                       help="组件加载路径 (用于加载预训练的增强组件)")
     
     
     args = parser.parse_args()
@@ -251,7 +296,8 @@ if __name__ == "__main__":
     
     print("启动VLA推理服务器")
     print(f"地址: {args.host}:{args.port}")
-    print(f"模型: {args.model}")
+    print(f"使用空间编码器: {args.use_spatial_encoder}")  # 🔥 修复
+    print(f"使用历史特征: {args.use_history_features}")    # 🔥 修复
     print("-" * 50)
-    
-    run_server(host=args.host, port=args.port, model_type=args.model)
+
+    run_server(host=args.host, port=args.port, model_type="CUT3R-pi0")  # 🔥 修复

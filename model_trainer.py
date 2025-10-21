@@ -346,11 +346,18 @@ class Lerobot_Trainer(L.LightningModule):
             hasattr(paligemma_model.paligemma, 'language_model')):
             
             language_model = paligemma_model.paligemma.language_model
-            if hasattr(language_model, 'save_pretrained'):  # 是PEFT模型
+            #if hasattr(language_model, 'save_pretrained'):  # 是PEFT模型
+                #adapter_dir = save_dir / "lora_adapter"
+                #language_model.save_pretrained(adapter_dir)
+                #print(f"  ✅ LoRA adapter -> {adapter_dir}")
+                #has_lora = True
+            if isinstance(language_model, PeftModel):
                 adapter_dir = save_dir / "lora_adapter"
                 language_model.save_pretrained(adapter_dir)
                 print(f"  ✅ LoRA adapter -> {adapter_dir}")
                 has_lora = True
+            else:
+                print(f"当前模式无LoRA (仅训练融合组件)")
         
         # 2. 保存其他训练组件（fusion_block等）
         try:
@@ -627,7 +634,11 @@ def train_with_mode(args):
     )
 
     # trainer.fit(lightning_module, dataloader)
-    trainer.fit(lightning_module, datamodule)
+    #trainer.fit(lightning_module, datamodule)
+    if args.ckpt_path:
+        trainer.fit(lightning_module, datamodule, ckpt_path=args.ckpt_path)
+    else:
+        trainer.fit(lightning_module, datamodule)
     
     print(f"✅ 训练完成: {args.mode}")
     final_path = save_dir / "final"
@@ -655,7 +666,8 @@ def main():
                        help="Pi0基础模型路径")
     parser.add_argument("--components_path", type=str, default=None,
                        help="组件加载路径 (用于加载预训练的fusion组件)")
-    
+    parser.add_argument("--ckpt_path", type=str, default=None,
+                       help="恢复训练的checkpoint路径") 
     # 数据参数
     parser.add_argument("--data_repo_id", type=str, default=None,
                        help="LeRobot数据集ID") 
