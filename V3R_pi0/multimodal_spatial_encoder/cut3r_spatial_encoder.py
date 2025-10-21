@@ -588,7 +588,7 @@ class Cut3rSpatialTower(nn.Module):
         dummy_image_432 = torch.nn.functional.interpolate(
             dummy_image, size=(432, 432), mode='bilinear'
         )
-        dummy_image_5d = dummy_image_432.unsqueeze(1)  # (batch_size, 1, 3, 432, 432)
+        dummy_image_5d = dummy_image_432.unsqueeze(0)  # (1,Batch_size, 3, 432, 432)
         
         F_max, B, C, H, W = dummy_image_5d.shape
         device = dummy_image.device
@@ -612,39 +612,38 @@ class Cut3rSpatialTower(nn.Module):
         
         # 执行重置逻辑
         with torch.no_grad():
-            try:
-                encoder = self.spatial_tower.spatial_model.encoder
-                shape, feat_ls, pos = encoder.cut3r._encode_views(views)
-                feat = feat_ls[-1]
-                state_feat, state_pos = encoder.cut3r._init_state(feat[0], pos[0])
-                mem = encoder.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
-                init_state_feat = state_feat.clone()
-                
-                feat_i = feat[0].to(dummy_image.dtype)
-                pos_i = pos[0]
-                
-                if encoder.cut3r.pose_head_flag:
-                    global_img_feat_i = encoder.cut3r._get_img_level_feat(feat_i)
-                    pose_feat_i = encoder.cut3r.pose_token.expand(feat_i.shape[0], -1, -1)
-                    pose_pos_i = -torch.ones(
-                        feat_i.shape[0], 1, 2, 
-                        device=feat_i.device, 
-                        dtype=pos_i.dtype
-                    )
-                else:
-                    pose_feat_i = None
-                    pose_pos_i = None
-                
-                # 🔥 执行重置（views[0]["reset"] 全为 True）
-                _ = encoder.cut3r._recurrent_rollout(
-                    state_feat, state_pos, feat_i, pos_i,
-                    pose_feat_i, pose_pos_i, init_state_feat,
-                    img_mask=views[0]["img_mask"],
-                    reset_mask=views[0]["reset"],  # (batch_size,) 全为 True
-                    update=views[0].get("update", None),
+            
+            encoder = self.spatial_tower.spatial_model.encoder
+            shape, feat_ls, pos = encoder.cut3r._encode_views(views)
+            feat = feat_ls[-1]
+            state_feat, state_pos = encoder.cut3r._init_state(feat[0], pos[0])
+            mem = encoder.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
+            init_state_feat = state_feat.clone()
+            
+            feat_i = feat[0].to(dummy_image.dtype)
+            pos_i = pos[0]
+            
+            if encoder.cut3r.pose_head_flag:
+                global_img_feat_i = encoder.cut3r._get_img_level_feat(feat_i)
+                pose_feat_i = encoder.cut3r.pose_token.expand(feat_i.shape[0], -1, -1)
+                pose_pos_i = -torch.ones(
+                    feat_i.shape[0], 1, 2, 
+                    device=feat_i.device, 
+                    dtype=pos_i.dtype
                 )
+            else:
+                pose_feat_i = None
+                pose_pos_i = None
                 
-            except Exception as e:
-                print(f"⚠️  重置错误: {e}")
+            # 🔥 执行重置（views[0]["reset"] 全为 True）
+            _ = encoder.cut3r._recurrent_rollout(
+                state_feat, state_pos, feat_i, pos_i,
+                pose_feat_i, pose_pos_i, init_state_feat,
+                img_mask=views[0]["img_mask"],
+                reset_mask=views[0]["reset"],  # (batch_size,) 全为 True
+                update=views[0].get("update", None),
+            )
+                
+        print(f"reset successfully")
                 # 降级方案
-                _ = self.spatial_tower(dummy_image_432.squeeze(1))
+                #_ = self.spatial_tower(dummy_image_432.squeeze(1))

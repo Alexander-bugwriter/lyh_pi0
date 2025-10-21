@@ -50,17 +50,16 @@ from pathlib import Path
 from safetensors.torch import save_model
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.configs.policies import PreTrainedConfig
-from V3R_pi0.modeling_pi0 import PI0Policy
-from utils.spatiotemporal_lerobot_dataset import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
+from V3R_pi0.modeling_pi0_test import PI0Policy
+from utils.spatiotemporal_lerobot_dataset_test import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
 from peft import PeftModel,get_peft_model, LoraConfig, TaskType
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, OneCycleLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, OneCycleLR,CosineAnnealingWarmRestarts
 
 # 🎯 训练模式定义
 class TrainingMode:
     FUSION_ONLY = "fusion_only"        # 只训练cross attention
     FUSION_AND_VLM = "fusion_and_vlm"  # fusion + VLM LoRA
-    SPATIAL_SEPARATOR_TOKEN_ONLY = "token_only"
-    HISTORY_FUSION = "history_fusion"  # ✅ 
+    HISTORY_FUSION = "history_fusion"  # ✅ 新增
     # 后续扩展:
     # MULTIFRAME = "multiframe"         # 多帧历史训练 (fusion冻结)
     # ADAPTIVE_SEP = "adaptive_sep"     # 自适应分隔符训练
@@ -100,25 +99,13 @@ class Lerobot_Trainer(L.LightningModule):
             self._setup_fusion_only()
         elif self.training_mode == TrainingMode.FUSION_AND_VLM:
             self._setup_fusion_and_vlm()
-        elif self.training_mode == TrainingMode.SPATIAL_SEPARATOR_TOKEN_ONLY:
-            self._setup_separator_token_only()
         elif self.training_mode == TrainingMode.HISTORY_FUSION:  # ✅ 新增
             self._setup_history_fusion()
         else:
             raise ValueError(f"不支持的训练模式: {self.training_mode}")
         
         self._print_trainable_stats()
-    def _setup_separator_token_only(self):
-        print("模式3: 只训练spatial_separator_token")
-        paligemma_model = self.policy.model.paligemma_with_expert
-        for param in paligemma_model.parameters():
-            param.requires_grad = False
-        if hasattr(paligemma_model, 'spatial_separator_token'):
-            paligemma_model.spatial_separator_token.requires_grad = True
-            print("  ✅ spatial_separator_token -> 可训练")
-        else:
-            print(" spatial_separator_token -> 不存在")
-        
+    
     def _setup_fusion_only(self):
         """模式1: 只训练Cross Attention融合模块"""
         print("模式1: 只训练Cross Attention融合模块")
@@ -159,12 +146,19 @@ class Lerobot_Trainer(L.LightningModule):
         print("  ✅ Cross Attention + VLM LoRA -> 可训练")
     
     def _setup_history_fusion(self):
-        """模式3: 训练历史特征融合 (VLM + separator)"""
-        print("🔥 模式4: 训练历史特征融合")
-        self._setup_separator_token_only()
-        self._setup_vlm_lora()
+        """模式3: 训练历史特征融合 (fusion + VLM + separator)"""
+        print("🔥 模式3: 训练历史特征融合")
+        
+        # 复用阶段2的所有设置
+        self._setup_fusion_and_vlm()
+        
         # ✅ 额外启用separator_token训练
-        print("  ✅ Spatial_separator_token + VLM LoRA -> 可训练")
+        paligemma_model = self.policy.model.paligemma_with_expert
+        if hasattr(paligemma_model, 'spatial_separator_token'):
+            paligemma_model.spatial_separator_token.requires_grad = True
+            print("  ✅ spatial_separator_token -> 可训练")
+        
+        print("  ✅ Fusion + VLM LoRA + Separator -> 可训练")
     
     def _setup_vlm_lora(self):
         """配置VLM的LoRA微调 (硬编码配置)"""
@@ -176,6 +170,7 @@ class Lerobot_Trainer(L.LightningModule):
             language_model.peft_config is not None and 
             len(language_model.peft_config) > 0):
             print(" LoRA已配置，启用训练")
+            # 启用LoRA参数训练
             for name, param in language_model.named_parameters():
                 if 'lora_' in name:
                     param.requires_grad = True
@@ -185,12 +180,6 @@ class Lerobot_Trainer(L.LightningModule):
             lora_params = sum(p.numel() for n, p in language_model.named_parameters() 
                             if p.requires_grad and 'lora_' in n)
             print(f"LoRA参数: {lora_params:,} 可训练")
-            # 启用LoRA参数训练
-            # for param in language_model.parameters():
-            #     if param.requires_grad:
-            #         continue
-            #     param.requires_grad = True
-            # return
         
         lora_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
@@ -212,6 +201,11 @@ class Lerobot_Trainer(L.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """训练步骤 (复用原有逻辑)"""
+        current_episode_idx = batch['episode_index'][0].item() if torch.is_tensor(batch['episode_index']) else batch['episode_index'][0]
+        if (self.last_episode_idx is not None and current_episode_idx != self.last_episode_idx):
+            self.policy.model.paligemma_with_expert.reset_cut3r_state()
+        
+        self.last_episode_idx = current_episode_idx
 
         loss, loss_dict = self.policy(batch)
         
@@ -276,6 +270,13 @@ class Lerobot_Trainer(L.LightningModule):
             milestones=[warmup_steps]
         )
         
+        #scheduler = CosineAnnealingWarmRestarts(
+        #    optimizer,
+        #    T_0=30000,        # 每30000步重启一次
+        #    T_mult=1,         # 固定周期长度
+        #    eta_min=lr * 0.1 # 最小学习率降到1%
+        #)
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -345,11 +346,18 @@ class Lerobot_Trainer(L.LightningModule):
             hasattr(paligemma_model.paligemma, 'language_model')):
             
             language_model = paligemma_model.paligemma.language_model
-            if hasattr(language_model, 'save_pretrained'):  # 是PEFT模型
+            #if hasattr(language_model, 'save_pretrained'):  # 是PEFT模型
+                #adapter_dir = save_dir / "lora_adapter"
+                #language_model.save_pretrained(adapter_dir)
+                #print(f"  ✅ LoRA adapter -> {adapter_dir}")
+                #has_lora = True
+            if isinstance(language_model, PeftModel):
                 adapter_dir = save_dir / "lora_adapter"
                 language_model.save_pretrained(adapter_dir)
                 print(f"  ✅ LoRA adapter -> {adapter_dir}")
                 has_lora = True
+            else:
+                print(f"当前模式无LoRA (仅训练融合组件)")
         
         # 2. 保存其他训练组件（fusion_block等）
         try:
@@ -527,7 +535,7 @@ def train_with_mode(args):
 
 
     if args.use_history_features:
-        history_camera_config = {"base_0_rgb": True, "left_wrist_0_rgb": True, "right_wrist_0_rgb": False}
+        history_camera_config = {"base_0_rgb": True, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
     else:
         history_camera_config = {"base_0_rgb": False, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
     policy = PI0Policy(
@@ -626,7 +634,11 @@ def train_with_mode(args):
     )
 
     # trainer.fit(lightning_module, dataloader)
-    trainer.fit(lightning_module, datamodule)
+    #trainer.fit(lightning_module, datamodule)
+    if args.ckpt_path:
+        trainer.fit(lightning_module, datamodule, ckpt_path=args.ckpt_path)
+    else:
+        trainer.fit(lightning_module, datamodule)
     
     print(f"✅ 训练完成: {args.mode}")
     final_path = save_dir / "final"
@@ -640,9 +652,9 @@ def main():
     
     # 🎯 核心参数
     parser.add_argument("--mode", type=str, required=True,
-                   choices=[TrainingMode.FUSION_ONLY, TrainingMode.FUSION_AND_VLM, TrainingMode.SPATIAL_SEPARATOR_TOKEN_ONLY,
+                   choices=[TrainingMode.FUSION_ONLY, TrainingMode.FUSION_AND_VLM, 
                            TrainingMode.HISTORY_FUSION],  # ✅ 添加新选项
-                   help="训练模式: fusion_only | fusion_and_vlm | token_only | history_fusion")
+                   help="训练模式: fusion_only | fusion_and_vlm | history_fusion")
     parser.add_argument("--use_spatial_encoder", action="store_true", default=False,
                        help="是否使用空间编码器")
     parser.add_argument("--use_history_features", action="store_true", default=False,
@@ -654,7 +666,8 @@ def main():
                        help="Pi0基础模型路径")
     parser.add_argument("--components_path", type=str, default=None,
                        help="组件加载路径 (用于加载预训练的fusion组件)")
-    
+    parser.add_argument("--ckpt_path", type=str, default=None,
+                       help="恢复训练的checkpoint路径") 
     # 数据参数
     parser.add_argument("--data_repo_id", type=str, default=None,
                        help="LeRobot数据集ID") 

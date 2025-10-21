@@ -30,6 +30,32 @@ class PI0Policy(PreTrainedPolicy):
         self,
         config: PI0Config,
         tokenizer_path: str = "google/paligemma-3b-pt-224",
+        #新增：空间编码配置
+        use_spatial_encoder:bool =True,
+        spatial_tower:str ="cut3r",
+        spatial_tower_select_feature:str ="all",
+        spatial_camera_config:dict ={
+            "base_0_rgb": True,        # 基础相机使用CUT3R空间编码
+            "left_wrist_0_rgb": True, # 手腕相机不使用空间编码
+            "right_wrist_0_rgb": False,
+        },
+        
+        #新增：融合和投影配置
+        
+        fusion_block:str="cross_attention",
+        components_path: str = None,
+        
+        #新增：历史特征配置（如果你需要的话）
+        use_history_features:bool=True,
+        num_sampled_history_frames:int=5,
+        history_sampling_method:str="uniform",
+        history_camera_config:dict = {
+            "base_0_rgb": True,        # 默认只有基础相机使用历史特征
+            "left_wrist_0_rgb": False,
+            "right_wrist_0_rgb": False,
+        },
+        mode: str = "infer", 
+        
     ):
         """
         Args:
@@ -47,32 +73,31 @@ class PI0Policy(PreTrainedPolicy):
             train_expert_only=self.config.train_expert_only,
             attention_implementation=self.config.attention_implementation,
             
+            mode=mode,#传递训练或者推理参数
+            components_path=components_path,
             # 🔥 新增：空间编码配置
-            use_spatial_encoder=True,
-            spatial_tower="cut3r",
-            spatial_tower_select_feature="all",
-            spatial_camera_config={
-                "base_0_rgb": True,        # 基础相机使用CUT3R空间编码
-                "left_wrist_0_rgb": True, # 手腕相机不使用空间编码
-                "right_wrist_0_rgb": False,
-            },
+            use_spatial_encoder=use_spatial_encoder,
+            spatial_tower=spatial_tower,
+            spatial_tower_select_feature=spatial_tower_select_feature,
+            spatial_camera_config=spatial_camera_config,
             
             # 🔥 新增：融合和投影配置
-            mm_projector_type="mlp2x_gelu",
-            mm_hidden_size=768,
-            fusion_block="cross_attention",
+            
+            fusion_block=fusion_block,
             
             # 🔥 新增：历史特征配置（如果你需要的话）
-            use_history_features=True,
-            num_sampled_history_frames=5,
-            history_sampling_method="uniform",
-            history_camera_config = {
-                "base_0_rgb": True,        # 默认只有基础相机使用历史特征
-                "left_wrist_0_rgb": False,
-                "right_wrist_0_rgb": False,
-            },
+            use_history_features=use_history_features,
+            num_sampled_history_frames=num_sampled_history_frames,
+            history_sampling_method=history_sampling_method,
+            history_camera_config = history_camera_config,
         )
         self.model = PI0FlowMatching(config,paligemma_with_expert_config)
+
+        self.use_spatial_encoder = use_spatial_encoder
+        self.use_history_features = use_history_features
+        self.spatial_camera_config = spatial_camera_config
+        self.history_camera_config = history_camera_config
+
         self.reset()
 
     def reset(self):
@@ -93,8 +118,8 @@ class PI0Policy(PreTrainedPolicy):
             
             # 重置特征历史缓存（如果使用的话）
             if hasattr(paligemma_model, 'history_buffer') and paligemma_model.history_buffer:
-                paligemma_model.history_buffer.clear()
-                print("History buffer cleared.")
+                paligemma_model.history_buffer.clear()  # 清空所有相机
+                # print("History buffer cleared.")
         return None
 
     def get_history_info(self):
@@ -159,9 +184,12 @@ class PI0Policy(PreTrainedPolicy):
         noise = batch.get("noise", None)
         time = batch.get("time", None)
 
+        precomputed_spatial_features = batch.get("precomputed_spatial_features", None)
+
         loss_dict = {}
         losses = self.model.forward(
-            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time
+            images, img_masks, lang_tokens, lang_masks, state, actions, noise, time,
+            spatial_features=precomputed_spatial_features,
         )
 
         actions_is_pad = batch.get("action_is_pad", None)
@@ -246,6 +274,29 @@ class PI0Policy(PreTrainedPolicy):
         action = F.pad(action, (0, self.config.max_action_dim - action_dim))
         return action, action_dim
 
+
+    def _enhance_prompt_based_on_config(self, original_prompt: str) -> str:
+        """🔥 基于配置增强prompt（不管训练还是推理都基于配置决定）"""
+        
+        # 检查是否需要增强
+        has_spatial_enhancement = self.use_spatial_encoder 
+        has_history_enhancement = self.use_history_features  
+        if not has_spatial_enhancement and not has_history_enhancement:
+            return original_prompt
+        # 构建增强prompt
+        enhanced_prompt = original_prompt
+        if has_spatial_enhancement:
+            enhanced_prompt += "\nSpatial Enhancement: Advanced 3D geometry and depth perception available. Use spatial information for precise manipulation."
+        elif has_history_enhancement:
+            enhanced_prompt += "\nTemporal Context: History frames seperated by special token are provided with current view. Understand the temporal imformation of the total task and finish it."
+        elif has_spatial_enhancement and has_history_enhancement:
+            enhanced_prompt += "\nMultimodal Integration: Combine spatial and temporal information for comprehensive scene understanding. History frames seperated by special token are provided with current view. All the images are enhanced by spatial information.Please focus on the task and finish it."
+        
+        # enhanced_prompt += "\nExecute: Generate precise robot actions using available enhanced information."
+        
+        return enhanced_prompt
+
+
     def prepare_language(self, observation: dict[str, Tensor]):
         """If `prompt` is provided, modify it to PaliGemma format and tokenize it.
         If `lang_tokens` and `lang_masks` are provided, use them directly.
@@ -275,7 +326,9 @@ class PI0Policy(PreTrainedPolicy):
         device = observation["state"].device
         if prompt is not None and (lang_tokens is None or lang_masks is None):
             prompt = [p if p.startswith("<bos>") else f"<bos>{p}" for p in prompt]
+            prompt = [self._enhance_prompt_based_on_config(p) for p in prompt]  # 🔥 新增这一行
             prompt = [p if p.endswith("\n") else f"{p}\n" for p in prompt]
+            print("prompt:",prompt)
             tokenized_prompt = self.language_tokenizer.__call__(
                 prompt,
                 padding="max_length",
@@ -371,7 +424,8 @@ class PI0FlowMatching(nn.Module):
             
             # 模仿VLM3R：如果CUDA可用，明确移动到CUDA
             if torch.cuda.is_available():
-                device = torch.device("cuda")
+                # device = torch.device("cuda")
+                device = next(self.paligemma_with_expert.parameters()).device
                 dtype = torch.float16
                 
                 print(f"Moving spatial tower to {device} with dtype {dtype}")
@@ -398,7 +452,7 @@ class PI0FlowMatching(nn.Module):
         return time.to(dtype=torch.float32, device=device)
 
     def embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks
+        self, images, img_masks, lang_tokens, lang_masks, precomputed_spatial_features=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer to prepare
         for PaliGemma transformer processing.
@@ -421,8 +475,16 @@ class PI0FlowMatching(nn.Module):
 
         # 🔥 关键修改：直接传递原始格式，不rearrange
         #img_emb = self.paligemma_with_expert.embed_image(images)  # 传入(b,n,c,h,w)
-        img_features_list = self.paligemma_with_expert.embed_image(images)
-    
+        # img_features_list = self.paligemma_with_expert.embed_image(images)
+        if precomputed_spatial_features is not None:
+            # 使用支持预计算特征的方法
+            img_features_list = self.paligemma_with_expert.embed_image_with_preprocessing_feature(
+                images, precomputed_spatial_features
+            )
+        else:
+            # 使用原始方法
+            img_features_list = self.paligemma_with_expert.embed_image(images)
+        
         # 找到最大长度
         max_length = max(f.shape[1] for f in img_features_list)  # 比如513
     
@@ -564,6 +626,7 @@ class PI0FlowMatching(nn.Module):
         actions,
         noise=None,
         time=None,
+        spatial_features=None,
     ) -> Tensor:
         bsize = state.shape[0]
         dtype = state.dtype
@@ -584,10 +647,12 @@ class PI0FlowMatching(nn.Module):
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
-
+        
+        preprocessed_spatial_features = spatial_features
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
+            images, img_masks, lang_tokens, lang_masks, precomputed_spatial_features=preprocessed_spatial_features
         )
+
         suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(
             state, x_t, time
         )

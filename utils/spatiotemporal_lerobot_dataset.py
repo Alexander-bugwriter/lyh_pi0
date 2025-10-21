@@ -35,7 +35,8 @@ class LerobotPI0Dataset(Dataset):
         # 添加缓存逻辑
         
         cache_file = f".dataset_cache_{debug_episodes if debug_episodes is not None else 'all'}.pkl"
-        cache_path = os.path.abspath(cache_file)  # 获取绝对路径
+        # cache_path = os.path.abspath(cache_file)  # 获取绝对路径
+        cache_path = os.path.join(root, cache_file)  # 数据集目录下
 
         
         print(f"DEBUG: cache_file = {cache_file}")
@@ -138,6 +139,8 @@ class LerobotPI0Dataset(Dataset):
             ),
             "prompt": prompt,
             "episode_index": item["episode_index"],
+            "frame_index": item["frame_index"],
+            "timestamp":item["timestamp"],
         }
     
 class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
@@ -153,11 +156,13 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
     
         self.spatial_features_dir = spatial_features_dir
         self.spatial_features_cache = {}
+        self.episode_frame_mapping = {}  # 🔥 新增这一行
         self.debug_episodes = debug_episodes
 
 
         if spatial_features_dir:
             self._load_spatial_features_index()
+            self._build_episode_frame_mapping()  # 🔥 新增这一行调用
 
     @staticmethod
     def load_single_file(file_path):
@@ -171,16 +176,15 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
 
     def _load_spatial_features_index(self):
         """建立文件路径索引，确保排序"""
-        cache_dir = Path(self.spatial_features_dir) / ".cache"
-        cache_dir.mkdir(exist_ok=True)
         debug_suffix = f"_{self.debug_episodes}" if self.debug_episodes is not None else "_all"
-        cache_filename = f"spatial_index_cache{debug_suffix}.pkl"
-        index_cache_file = cache_dir / cache_filename
+        # index_cache_file = f".spatial_index_cache{debug_suffix}.pkl"
+        index_cache_file = os.path.join(self.spatial_features_dir, f".spatial_index_cache{debug_suffix}.pkl")  # 数据集目录下
+
         if os.path.exists(index_cache_file):
             print(f"从缓存加载索引: {index_cache_file}")
             with open(index_cache_file, 'rb') as f:
                 cache_data = pickle.load(f)
-                spatial_files_index  = cache_data['spatial_path_index']
+                spatial_files_index  = cache_data['spatial_features_cache']
             print(f"索引缓存加载成功，共 {len(spatial_files_index)} 个episodes")
 
             # 🔥 还是打印验证信息
@@ -215,18 +219,18 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             
             #self._print_cache_validation()
         # 🔥 第二步：根据路径索引，单线程读取所有数据到内存
-        print(f"单线程加载 {len(spatial_files_index)} 个特征文件到内存...")
-        self.spatial_features_cache = {}  # 这里存完整数据
+        # print(f"单线程加载 {len(spatial_files_index)} 个特征文件到内存...")
+        # self.spatial_features_cache = {}  # 这里存完整数据
 
-        for i, (episode_id, file_path) in enumerate(sorted(spatial_files_index.items())):
-            if i % 100 == 0:
-                print(f"  加载进度: {i}/{len(spatial_files_index)}")
+        # for i, (episode_id, file_path) in enumerate(sorted(spatial_files_index.items())):
+        #     if i % 100 == 0:
+        #         print(f"  加载进度: {i}/{len(spatial_files_index)}")
 
-            with open(file_path, 'rb') as f:
-                episode_features = pickle.load(f)
-                self.spatial_features_cache[episode_id] = episode_features
+        #     with open(file_path, 'rb') as f:
+        #         episode_features = pickle.load(f)
+        #         self.spatial_features_cache[episode_id] = episode_features
 
-        print(f"所有特征已加载到内存，共 {len(self.spatial_features_cache)} 个episodes")
+        #print(f"所有特征已加载到内存，共 {len(self.spatial_features_cache)} 个episodes")
     def _print_cache_validation(self):
         """打印缓存验证信息"""
         print("📋 缓存内容验证:")
@@ -280,9 +284,103 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
     #             print(f"加载 {feature_file} 失败: {e}")
     #
     #     print(f"特征索引加载完成，覆盖 {len(self.spatial_features_cache)} 个episodes")
+    def _build_episode_frame_mapping(self):
+        """🔥 新增: 构建 (episode_id, frame_index) -> dataset_idx 的映射，支持缓存"""
+        
+        # 🔥 缓存文件路径
+        debug_suffix = f"_{self.debug_episodes}" if self.debug_episodes is not None else "_all"
+        mapping_cache_file = os.path.join(self.spatial_features_dir, f".episode_frame_mapping{debug_suffix}.pkl")
+        
+        # 🔥 尝试加载缓存
+        if os.path.exists(mapping_cache_file):
+            print(f"从缓存加载映射表: {mapping_cache_file}")
+            with open(mapping_cache_file, 'rb') as f:
+                self.episode_frame_mapping = pickle.load(f)
+            print(f"✅ 映射表加载成功,共 {len(self.episode_frame_mapping)} 条记录")
+            return
+        
+        # 🔥 缓存不存在，构建映射表
+        print("构建episode-frame映射表...")
+        
+        for dataset_idx in range(len(self.dataset)):
+            item = self.dataset[dataset_idx]
+            episode_id = item["episode_index"].item()
+            frame_id = item.get("frame_index", dataset_idx).item()
+            
+            self.episode_frame_mapping[(episode_id, frame_id)] = dataset_idx
+        
+        print(f"✅ 映射表构建完成,共 {len(self.episode_frame_mapping)} 条记录")
+        
+        # 🔥 保存缓存
+        with open(mapping_cache_file, 'wb') as f:
+            pickle.dump(self.episode_frame_mapping, f)
+        print(f"✅ 映射表已缓存到: {mapping_cache_file}")
 
+    def _load_history_frames_by_indices(self, episode_id, history_indices):
+        """
+        🔥 新增: 根据历史索引动态加载历史帧
+        
+        Returns:
+            history_frames: List[dict] 包含 {frame_index, base_image_uint8, wrist_image_uint8, spatial_tokens}
+        """
+        history_frames = []
+        
+        if episode_id not in self.spatial_features_cache:
+            return []
+        
+        # 加载该episode的spatial特征文件
+        file_path = self.spatial_features_cache[episode_id]  # 🔥 使用正确的属性名
+        with open(file_path, 'rb') as f:
+            episode_features = pickle.load(f)
+        
+        for hist_frame_idx in history_indices:
+            # 1. 从dataset获取原始图像
+            dataset_idx = self.episode_frame_mapping.get((episode_id, hist_frame_idx))
+            if dataset_idx is None:
+                continue
+            
+            hist_item = self.dataset[dataset_idx]
+            hist_normalized = self.normalizer.normalize(hist_item)
+            
+            # 2. 处理base图像
+            base_image = hist_normalized["image"]
+            while base_image.dim() > 3 and 1 in base_image.shape:
+                base_image = base_image.squeeze()
+            base_image_uint8 = (base_image * 255).to(torch.uint8)
+            
+            # 3. 处理wrist图像
+            wrist_image_uint8 = None
+            if "wrist_image" in hist_normalized:
+                wrist_image = hist_normalized["wrist_image"]
+                while wrist_image.dim() > 3 and 1 in wrist_image.shape:
+                    wrist_image = wrist_image.squeeze()
+                wrist_image_uint8 = (wrist_image * 255).to(torch.uint8)
+            
+            # 4. 找到对应的spatial tokens
+            frame_spatial_tokens = None
+            for frame_feat in episode_features['features']:
+                if frame_feat['frame_index'] == hist_frame_idx:
+                    frame_spatial_tokens = {
+                        'base_camera_tokens': frame_feat['base_camera_tokens'],
+                        'base_patch_tokens': frame_feat['base_patch_tokens'],
+                        'wrist_camera_tokens': frame_feat['wrist_camera_tokens'],
+                        'wrist_patch_tokens': frame_feat['wrist_patch_tokens'],
+                    }
+                    break
+            
+            if frame_spatial_tokens is None:
+                continue
+            
+            # 5. 组装
+            history_frames.append({
+                'frame_index': hist_frame_idx,
+                'base_image_uint8': base_image_uint8,
+                'wrist_image_uint8': wrist_image_uint8,
+                **frame_spatial_tokens
+            })
+        
+        return history_frames
 
-    
     def __getitem__(self, idx):
         """🔥 这是唯一需要添加的方法"""
         item = self.dataset[idx]
@@ -312,14 +410,27 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
         if self.spatial_features_dir:
             episode_id = item["episode_index"].item()
             frame_id = item.get("frame_index", idx).item()
-            
+            # if episode_id in self.spatial_features_cache:
+            #     file_path = self.spatial_features_cache[episode_id]  # 现在这里是路径
+            #     # 🔥 按需加载
+            #     with open(file_path, 'rb') as f:
+            #         episode_features = pickle.load(f)
+            #     for frame_feat in episode_features['features']:
+            #         if frame_feat['frame_index'] == frame_id:
+            #             precomputed_spatial_features = {
+            #                 "base_camera_tokens": frame_feat['base_camera_tokens'],
+            #                 "wrist_camera_tokens": frame_feat['wrist_camera_tokens'],
+            #                 "base_patch_tokens": frame_feat['base_patch_tokens'],
+            #                 "wrist_patch_tokens": frame_feat['wrist_patch_tokens'],
+            #                 "history_info": frame_feat.get('history_info', None)  # 🔥 支持历史信息
+            #             }
+            #             break
+            # 🔥 新逻辑：动态加载历史if episode_id in self.spatial_path_index:
             if episode_id in self.spatial_features_cache:
-                episode_features = self.spatial_features_cache[episode_id]
-            #if episode_id in self.spatial_features_cache:
-                #file_path = self.spatial_features_cache[episode_id]  # 现在这里是路径
-                # 🔥 按需加载
-                #with open(file_path, 'rb') as f:
-                    #episode_features = pickle.load(f)
+                file_path = self.spatial_features_cache[episode_id]
+                with open(file_path, 'rb') as f:
+                    episode_features = pickle.load(f)
+                
                 for frame_feat in episode_features['features']:
                     if frame_feat['frame_index'] == frame_id:
                         precomputed_spatial_features = {
@@ -327,8 +438,24 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
                             "wrist_camera_tokens": frame_feat['wrist_camera_tokens'],
                             "base_patch_tokens": frame_feat['base_patch_tokens'],
                             "wrist_patch_tokens": frame_feat['wrist_patch_tokens'],
-                            "history_info": frame_feat.get('history_info', None)  # 🔥 支持历史信息
                         }
+                        
+                        # 🔥 如果有历史索引,动态加载历史帧
+                        if 'history_info' in frame_feat:
+                            history_info = frame_feat['history_info']
+                            history_indices = history_info['history_indices']
+                            
+                            # 调用新函数动态加载完整历史数据
+                            history_frames = self._load_history_frames_by_indices(
+                                episode_id, history_indices
+                            )
+                            
+                            precomputed_spatial_features['history_info'] = {
+                                'num_history_frames': history_info['num_history_frames'],
+                                'history_indices': history_indices,
+                                'current_frame_index': frame_id,
+                                'history_frames': history_frames  # 完整的历史帧数据
+                            }
                         break
         
         # 任务指令（与父类相同）
