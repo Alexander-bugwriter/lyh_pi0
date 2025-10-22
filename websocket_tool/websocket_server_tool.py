@@ -78,9 +78,6 @@ class SimpleForwardServer:
                 except queue.Empty:
                     logger.error("策略响应超时")
                     await websocket.send(msgpack_numpy.packb({"error": "timeout"}))
-                except Exception as e:
-                    logger.error(f"处理消息错误: {e}")
-                    continue
                     
         except websockets.exceptions.ConnectionClosed:
             logger.info("客户端断开连接")

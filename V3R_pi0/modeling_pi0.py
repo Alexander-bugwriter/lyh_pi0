@@ -390,7 +390,7 @@ class PI0FlowMatching(nn.Module):
         # )
         self.paligemma_with_expert = PaliGemmaWithExpertModel(paligemma_with_expert_config)
         #转换模型，确保都在一个设备上
-        self._initialize_device_management()
+        #self._initialize_device_management()
         # projection layers
         self.state_proj = nn.Linear(self.config.max_state_dim, self.config.proj_width)
         self.action_in_proj = nn.Linear(
@@ -408,10 +408,16 @@ class PI0FlowMatching(nn.Module):
         )
 
         self.set_requires_grad()
-
+        self._initialize_device_management()
     def _initialize_device_management(self):
         """模仿VLM3R的设备管理策略"""
         # 确保spatial_tower正确加载和设备管理
+        if torch.cuda.is_available():
+            target_device = torch.device("cuda:0")  # 或从self.device获取
+            print(f"Moving paligemma_with_expert to {target_device}...")
+            self.paligemma_with_expert = self.paligemma_with_expert.to(target_device)
+            print(f"Now paligemma_with_expert is on {target_device}...")
+
         if hasattr(self.paligemma_with_expert, 'spatial_tower') and self.paligemma_with_expert.spatial_tower is not None:
             spatial_tower = self.paligemma_with_expert.spatial_tower
             
@@ -440,6 +446,21 @@ class PI0FlowMatching(nn.Module):
             print("Spatial tower device management completed")
         else:
             print("No spatial tower found, skipping device management")
+        
+        print("移动投影层...")
+        projection_layers = [
+            ('state_proj', self.state_proj),
+            ('action_in_proj', self.action_in_proj),
+            ('action_out_proj', self.action_out_proj),
+            ('action_time_mlp_in', self.action_time_mlp_in),
+            ('action_time_mlp_out', self.action_time_mlp_out),
+        ]
+    
+        for name, layer in projection_layers:
+            if layer is not None:
+                setattr(self, name, layer.to(device))
+                print(f"{name:20s} -> {device}")
+
 
 
     def set_requires_grad(self):

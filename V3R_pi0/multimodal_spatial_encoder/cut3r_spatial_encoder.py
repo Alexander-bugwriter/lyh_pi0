@@ -122,6 +122,21 @@ class Cut3rEncoder(nn.Module):
         for param in self.cut3r.parameters():
             param.requires_grad = False
 
+        self.cached_state_feat = None
+        self.cached_state_pos = None
+        self.cached_mem = None
+        self.cached_init_state_feat = None
+        self.cached_init_mem = None
+    
+    def reset_state(self):
+        """🔥 重置缓存状态"""
+        self.cached_state_feat = None
+        self.cached_state_pos = None
+        self.cached_mem = None
+        self.cached_init_state_feat = None
+        self.cached_init_mem = None
+        print("Cut3rEncoder state cache cleared")
+
     def export_point_cloud(self, views, ress, point_cloud_output_paths: Optional[list[str]]):
         if not _OPEN3D_AVAILABLE:
             rank0_print("Skipping point cloud export because open3d is not available.")
@@ -230,10 +245,25 @@ class Cut3rEncoder(nn.Module):
         views = prepare_input(pixel_values=pixel_values)
         shape, feat_ls, pos = self.cut3r._encode_views(views)
         feat = feat_ls[-1]
-        state_feat, state_pos = self.cut3r._init_state(feat[0], pos[0])
-        mem = self.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
-        init_state_feat = state_feat.clone()
-        init_mem = mem.clone()
+        # state_feat, state_pos = self.cut3r._init_state(feat[0], pos[0])
+        # mem = self.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
+        # init_state_feat = state_feat.clone()
+        # init_mem = mem.clone()
+        if self.cached_state_feat is not None:
+            # 复用上一次的状态
+            state_feat = self.cached_state_feat
+            state_pos = self.cached_state_pos
+            mem = self.cached_mem
+            init_state_feat = self.cached_init_state_feat
+            init_mem = self.cached_init_mem
+            # print("🔄 Reusing cached state")
+        else:
+            # 初始化新状态
+            state_feat, state_pos = self.cut3r._init_state(feat[0], pos[0])
+            mem = self.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
+            init_state_feat = state_feat.clone()
+            init_mem = mem.clone()
+            # print("🆕 Initialized new state")
         all_state_args = [(state_feat, state_pos, init_state_feat, mem, init_mem)]
         ress = []
         # spatial_feat = []
@@ -392,6 +422,12 @@ class Cut3rEncoder(nn.Module):
         patch_features = rearrange(patch_features, 'frame batch token_num token_dim -> (batch frame) token_num token_dim')
         camera_tokens = torch.stack(camera_tokens, dim=0)
         camera_tokens = rearrange(camera_tokens, 'frame batch token_num token_dim-> (batch frame) token_num token_dim')
+
+        self.cached_state_feat = state_feat.detach()
+        self.cached_state_pos = state_pos.detach() 
+        self.cached_mem = mem.detach()
+        self.cached_init_state_feat = init_state_feat.detach()
+        self.cached_init_mem = init_mem.detach()
 
         return (camera_tokens, patch_features)
 
@@ -566,7 +602,7 @@ class Cut3rSpatialTower(nn.Module):
     def image_size(self):
         return self.config.image_size
     
-    def reset_state(self, batch_size=1):
+    def reset_state(self, batch_size=2):
         """
         🔥 批次重置 CUT3R 内部状态
         
@@ -577,73 +613,79 @@ class Cut3rSpatialTower(nn.Module):
             print("⚠️  Spatial tower not loaded, cannot reset")
             return
         
-        # 创建虚拟输入
-        dummy_image = torch.zeros(
-            batch_size, 3, 224, 224, 
-            device=self.device, 
-            dtype=self.dtype
-        )
-        
-        # 准备 views 结构
-        dummy_image_432 = torch.nn.functional.interpolate(
-            dummy_image, size=(432, 432), mode='bilinear'
-        )
-        dummy_image_5d = dummy_image_432.unsqueeze(0)  # (1,Batch_size, 3, 432, 432)
-        
-        F_max, B, C, H, W = dummy_image_5d.shape
-        device = dummy_image.device
-        
-        views = []
-        for i in range(F_max):
-            current_frame_batch = dummy_image_5d[i]
-            view = {
-                "img": current_frame_batch,
-                "ray_map": torch.full((B, 6, H, W), torch.nan).to(device),
-                "true_shape": torch.tensor([H, W], device=device).expand(B, -1),
-                "idx": i,
-                "instance": [str(j) for j in range(B)],
-                "camera_pose": torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1),
-                "img_mask": torch.tensor(True, device=device).expand(B),
-                "ray_mask": torch.tensor(False, device=device).expand(B),
-                "update": torch.tensor(True, device=device).expand(B),
-                "reset": torch.tensor(True, device=device).expand(B),  # 🔥 强制重置
-            }
-            views.append(view)
-        
-        # 执行重置逻辑
-        with torch.no_grad():
-            
+        try:
             encoder = self.spatial_tower.spatial_model.encoder
-            shape, feat_ls, pos = encoder.cut3r._encode_views(views)
-            feat = feat_ls[-1]
-            state_feat, state_pos = encoder.cut3r._init_state(feat[0], pos[0])
-            mem = encoder.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
-            init_state_feat = state_feat.clone()
+            encoder.reset_state()
+        except AttributeError:
+            print("⚠️  Cannot access Cut3rEncoder")
+        
+        # # 创建虚拟输入
+        # dummy_image = torch.zeros(
+        #     batch_size, 3, 224, 224, 
+        #     device=self.device, 
+        #     dtype=self.dtype
+        # )
+        
+        # # 准备 views 结构
+        # dummy_image_432 = torch.nn.functional.interpolate(
+        #     dummy_image, size=(432, 432), mode='bilinear'
+        # )
+        # dummy_image_5d = dummy_image_432.unsqueeze(0)  # (1,Batch_size, 3, 432, 432)
+        
+        # F_max, B, C, H, W = dummy_image_5d.shape
+        # device = dummy_image.device
+        
+        # views = []
+        # for i in range(F_max):
+        #     current_frame_batch = dummy_image_5d[i]
+        #     view = {
+        #         "img": current_frame_batch,
+        #         "ray_map": torch.full((B, 6, H, W), torch.nan).to(device),
+        #         "true_shape": torch.tensor([H, W], device=device).expand(B, -1),
+        #         "idx": i,
+        #         "instance": [str(j) for j in range(B)],
+        #         "camera_pose": torch.eye(4, device=device).unsqueeze(0).expand(B, -1, -1),
+        #         "img_mask": torch.tensor(True, device=device).expand(B),
+        #         "ray_mask": torch.tensor(False, device=device).expand(B),
+        #         "update": torch.tensor(True, device=device).expand(B),
+        #         "reset": torch.tensor(True, device=device).expand(B),  # 🔥 强制重置
+        #     }
+        #     views.append(view)
+        
+        # # 执行重置逻辑
+        # with torch.no_grad():
             
-            feat_i = feat[0].to(dummy_image.dtype)
-            pos_i = pos[0]
+        #     encoder = self.spatial_tower.spatial_model.encoder
+        #     shape, feat_ls, pos = encoder.cut3r._encode_views(views)
+        #     feat = feat_ls[-1]
+        #     state_feat, state_pos = encoder.cut3r._init_state(feat[0], pos[0])
+        #     mem = encoder.cut3r.pose_retriever.mem.expand(feat[0].shape[0], -1, -1)
+        #     init_state_feat = state_feat.clone()
             
-            if encoder.cut3r.pose_head_flag:
-                global_img_feat_i = encoder.cut3r._get_img_level_feat(feat_i)
-                pose_feat_i = encoder.cut3r.pose_token.expand(feat_i.shape[0], -1, -1)
-                pose_pos_i = -torch.ones(
-                    feat_i.shape[0], 1, 2, 
-                    device=feat_i.device, 
-                    dtype=pos_i.dtype
-                )
-            else:
-                pose_feat_i = None
-                pose_pos_i = None
+        #     feat_i = feat[0].to(dummy_image.dtype)
+        #     pos_i = pos[0]
+            
+        #     if encoder.cut3r.pose_head_flag:
+        #         global_img_feat_i = encoder.cut3r._get_img_level_feat(feat_i)
+        #         pose_feat_i = encoder.cut3r.pose_token.expand(feat_i.shape[0], -1, -1)
+        #         pose_pos_i = -torch.ones(
+        #             feat_i.shape[0], 1, 2, 
+        #             device=feat_i.device, 
+        #             dtype=pos_i.dtype
+        #         )
+        #     else:
+        #         pose_feat_i = None
+        #         pose_pos_i = None
                 
-            # 🔥 执行重置（views[0]["reset"] 全为 True）
-            _ = encoder.cut3r._recurrent_rollout(
-                state_feat, state_pos, feat_i, pos_i,
-                pose_feat_i, pose_pos_i, init_state_feat,
-                img_mask=views[0]["img_mask"],
-                reset_mask=views[0]["reset"],  # (batch_size,) 全为 True
-                update=views[0].get("update", None),
-            )
+        #     # 🔥 执行重置（views[0]["reset"] 全为 True）
+        #     _ = encoder.cut3r._recurrent_rollout(
+        #         state_feat, state_pos, feat_i, pos_i,
+        #         pose_feat_i, pose_pos_i, init_state_feat,
+        #         img_mask=views[0]["img_mask"],
+        #         reset_mask=views[0]["reset"],  # (batch_size,) 全为 True
+        #         update=views[0].get("update", None),
+        #     )
                 
-        print(f"reset successfully")
+        # print(f"reset successfully")
                 # 降级方案
                 #_ = self.spatial_tower(dummy_image_432.squeeze(1))

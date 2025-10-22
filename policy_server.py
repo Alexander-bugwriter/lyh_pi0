@@ -48,29 +48,42 @@ from websocket_tool.websocket_server_tool import (
 import argparse
 from pathlib import Path
 import json
-from V3R_pi0.modeling_pi0_test import PI0Policy
+from V3R_pi0.modeling_pi0 import PI0Policy
 from lerobot.configs.policies import PreTrainedConfig
 
 # 设置环境变量
 os.environ["LEROBOT_DEVICE"] = "cuda" if torch.cuda.is_available() else "cpu"
+from utils.spatiotemporal_lerobot_dataset import LerobotPI0Dataset
 
-# 模型路径配置
-PATH_TO_JAX_PI_MODEL = "/opt/liblibai-models/user-workspace2/users/lyh/model_checkpoint/pi0/jax/pi0_libero/pi0_libero"  # 归一化参数路径
-def load_normalization_stats():
-    """加载归一化参数"""
-    norm_stats_path = Path(PATH_TO_JAX_PI_MODEL) / "assets/physical-intelligence/libero/norm_stats.json"
-
-    if not norm_stats_path.exists():
-        print(f"⚠️  警告: 归一化参数文件不存在: {norm_stats_path}")
-    with open(norm_stats_path) as f:
-        norm_stats = json.load(f)
-
-    return {
-        'state_mean': np.array(norm_stats["norm_stats"]["state"]["mean"][:8], dtype=np.float32),
-        'state_std': np.array(norm_stats["norm_stats"]["state"]["std"][:8], dtype=np.float32),
-        'action_mean': np.array(norm_stats["norm_stats"]["actions"]["mean"][:7], dtype=np.float32),
-        'action_std': np.array(norm_stats["norm_stats"]["actions"]["std"][:7], dtype=np.float32)
+def load_normalization_stats_from_dataset(dataset_path):
+    """
+    🔥 从数据集快速加载归一化参数（使用缓存）
+    """
+    print(f"从数据集加载归一化参数: {dataset_path}")
+    
+    #只需要 root 参数，debug_episodes=1 快速加载
+    dataset = LerobotPI0Dataset(
+            root=dataset_path,
+            debug_episodes=1  # 只加载1个episode，够获取meta就行
+    )
+        
+        # 🔥 从 dataset.meta.stats 获取归一化参数
+    stats = dataset.dataset.meta.stats
+        
+    print(f"归一化参数加载成功")    
+        # 转换为 numpy 格式
+    norm_stats = {
+        'state_mean': np.array(stats["state"]["mean"], dtype=np.float32),
+        'state_std': np.array(stats["state"]["std"], dtype=np.float32),
+        'action_mean': np.array(stats["actions"]["mean"], dtype=np.float32),
+        'action_std': np.array(stats["actions"]["std"], dtype=np.float32)
     }
+        
+    print(f"   State: mean={norm_stats['state_mean'][:3]}, std={norm_stats['state_std'][:3]}")
+    print(f"   Action: mean={norm_stats['action_mean'][:3]}, std={norm_stats['action_std'][:3]}")
+        
+    return norm_stats
+        
 def convert_observation(raw_data: dict, device, norm_stats) -> dict:
     """
     转换原始数据为模型期望的格式
@@ -201,8 +214,10 @@ def run_server(host="0.0.0.0", port=8000, model_type="pi0"):
         # 🔥 融合配置
         # fusion_block=getattr(args, 'fusion_block', 'cross_attention'),
     )
-    device = policy.config.device
-    norm_stats = load_normalization_stats()
+    #device = policy.config.device
+    device="cuda:0"
+    #norm_stats = load_normalization_stats()
+    norm_stats = load_normalization_stats_from_dataset(args.dataset_path)
     # 启动WebSocket服务器
     print(f"启动服务器 {host}:{port}")
     start_websocket_server(host=host, port=port, device=device)
@@ -258,9 +273,6 @@ def run_server(host="0.0.0.0", port=8000, model_type="pi0"):
         except KeyboardInterrupt:
             print("\n收到中断信号，正在关闭服务器...")
             break
-        except Exception as e:
-            print(f"❌ 处理请求时发生错误: {e}")
-            continue
 
 if __name__ == "__main__":
     
@@ -273,13 +285,12 @@ if __name__ == "__main__":
                        help="是否使用历史特征")
     parser.add_argument("--num_sampled_history_frames", type=int, default=3,
                        help="历史帧采样数量")
-    
     parser.add_argument("--base_model_path", type=str, required=True,
                        help="基座模型路径")
     parser.add_argument("--components_path", type=str, default=None,
                        help="组件加载路径 (用于加载预训练的增强组件)")
-    
-    
+    parser.add_argument("--dataset_path", type=str, required=True,
+                       help="数据集路径（用于加载归一化参数）")
     args = parser.parse_args()
     if args.components_path is not None:
         components_path = Path(args.components_path)
