@@ -62,24 +62,69 @@ def compute_history_indices(current_t, num_history_frames=3):
     
     return history_indices
 
-def group_by_episode(dataset):
-    """按episode分组并按frame_index排序"""
-    print("📊 按episode分组数据...")
+# def group_by_episode(dataset):
+#     """按episode分组并按frame_index排序"""
+#     print("📊 按episode分组数据...")
+    
+#     episodes = defaultdict(list)
+    
+#     for idx in tqdm(range(len(dataset)), desc="分组数据"):
+#         item = dataset[idx]
+#         episode_idx = item['episode_index'].item()
+#         episodes[episode_idx].append((idx, item))  # 保存原始索引
+    
+#     # 按frame_index排序每个episode
+#     for episode_idx in episodes:
+#         episodes[episode_idx].sort(key=lambda x: x[1]['frame_index'].item())
+    
+#     print(f"分组完成：{len(episodes)} 个episodes")
+#     return dict(episodes)
+def group_by_episode(dataset, data_root=None, debug_episodes=None):
+    """按episode分组并按frame_index排序,支持缓存"""
+    print("按episode分组数据...")
+    
+    if data_root:
+        debug_suffix = f"_{debug_episodes}" if debug_episodes is not None else "_all"
+        cache_file = os.path.join(data_root, f".episode_grouping_cache{debug_suffix}.pkl")
+        
+        if os.path.exists(cache_file):
+            print(f"从缓存加载: {cache_file}")
+            with open(cache_file, 'rb') as f:
+                episodes = pickle.load(f)
+            print(f"加载成功,共 {len(episodes)} 个episodes")
+            return episodes
     
     episodes = defaultdict(list)
     
     for idx in tqdm(range(len(dataset)), desc="分组数据"):
         item = dataset[idx]
         episode_idx = item['episode_index'].item()
-        episodes[episode_idx].append((idx, item))  # 保存原始索引
+        episodes[episode_idx].append((idx, item))
     
-    # 按frame_index排序每个episode
-    for episode_idx in episodes:
+    for episode_idx in tqdm(episodes, desc="排序episodes"):
         episodes[episode_idx].sort(key=lambda x: x[1]['frame_index'].item())
     
-    print(f"分组完成：{len(episodes)} 个episodes")
-    return dict(episodes)
-
+    episodes = dict(episodes)
+    print(f"分组完成:{len(episodes)} 个episodes")
+    
+    if data_root:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(episodes, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"已缓存到: {cache_file}")
+    
+    return episodes
+def get_processed_episodes(output_dir):
+    """检查已经处理过的episodes"""
+    if not os.path.exists(output_dir):
+        return set()
+    
+    processed = set()
+    for f in os.listdir(output_dir):
+        if f.startswith('episode_spatial_features') and f.endswith('.pkl'):
+            episode_id = int(f.split('_')[-1].replace('.pkl', ''))
+            processed.add(episode_id)
+    
+    return processed
 
 def init_cut3r(cut3r_weights_path, device='cuda:0'):
     """初始化CUT3R模型"""
@@ -260,7 +305,7 @@ def main():
     
     # 其他参数
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--image_size", type=int, default=256)
+    parser.add_argument("--image_size", type=int, default=224)
     parser.add_argument("--action_horizon", type=int, default=50)
     parser.add_argument("--debug_episodes", type=int, default=None)
     parser.add_argument("--save_history_features", action="store_true",
@@ -306,16 +351,23 @@ def main():
     
    
     # 按episode分组
-    episodes_dict = group_by_episode(dataset)
+    episodes_dict = group_by_episode(dataset, data_root=args.data_root, debug_episodes=args.debug_episodes)
     
     # 初始化CUT3R
     spatial_tower = init_cut3r(args.cut3r_weights_path, args.device)
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
+
+    processed_episodes = get_processed_episodes(args.output_dir)
+    if processed_episodes:
+        print(f"Found {len(processed_episodes)} already processed episodes, will skip them")
     
     # 处理每个episode
     for episode_id, episode_data in episodes_dict.items():
+        if episode_id in processed_episodes:
+            print(f"Skipping already processed Episode {episode_id}")
+            continue
         # 🔥 关键：提取包含历史信息的特征
         # episode_features = extract_episode_features_with_history(
         #     spatial_tower, episode_data, episode_id, dataset, args.save_history_features,
