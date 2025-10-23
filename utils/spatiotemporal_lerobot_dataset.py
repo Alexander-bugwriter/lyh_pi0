@@ -42,10 +42,10 @@ class LerobotPI0Dataset(Dataset):
         print(f"DEBUG: cache_file = {cache_file}")
         print(f"DEBUG: cache_path = {cache_path}")
         print(f"DEBUG: 当前工作目录 = {os.getcwd()}")
-        print(f"DEBUG: 缓存文件是否存在 = {os.path.exists(cache_file)}")
-        if os.path.exists(cache_file):
-            print(f"从缓存加载: {cache_file}")
-            with open(cache_file, 'rb') as f:
+        print(f"DEBUG: 缓存文件是否存在 = {os.path.exists(cache_path)}")
+        if os.path.exists(cache_path):
+            print(f"从缓存加载: {cache_path}")
+            with open(cache_path, 'rb') as f:
                 cache_data = pickle.load(f)
                 self.dataset = cache_data['dataset']
                 self.normalizer = cache_data['normalizer']
@@ -74,12 +74,12 @@ class LerobotPI0Dataset(Dataset):
                         "actions": "meanstd",
                     }
                 )
-                with open(cache_file, 'wb') as f:
+                with open(cache_path, 'wb') as f:
                     pickle.dump({
                         'dataset': self.dataset,
                         'normalizer': self.normalizer
                     }, f)
-                print(f"已缓存到: {cache_file}")
+                print(f"已缓存到: {cache_path}")
 
             except Exception as e:
                 print(f"数据集加载失败: {e}")

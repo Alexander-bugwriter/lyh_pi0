@@ -60,6 +60,27 @@ def load_normalization_stats_from_dataset(dataset_path):
     🔥 从数据集快速加载归一化参数（使用缓存）
     """
     print(f"从数据集加载归一化参数: {dataset_path}")
+    cache_file = Path(dataset_path) / "norm_stats.json"
+    
+    # 🔥 如果缓存存在，直接加载
+    if cache_file.exists():
+        print(f"✅ 从缓存加载: {cache_file}")
+        with open(cache_file, 'r') as f:
+            stats = json.load(f)
+        
+        norm_stats = {
+            'state_mean': np.array(stats["state"]["mean"], dtype=np.float32),
+            'state_std': np.array(stats["state"]["std"], dtype=np.float32),
+            'action_mean': np.array(stats["actions"]["mean"], dtype=np.float32),
+            'action_std': np.array(stats["actions"]["std"], dtype=np.float32)
+        }
+        
+        print(f"   State: mean={norm_stats['state_mean'][:3]}, std={norm_stats['state_std'][:3]}")
+        print(f"   Action: mean={norm_stats['action_mean'][:3]}, std={norm_stats['action_std'][:3]}")
+        return norm_stats
+    
+    # 🔥 缓存不存在，从数据集加载
+    print(f"首次加载，从数据集提取归一化参数: {dataset_path}")
     
     #只需要 root 参数，debug_episodes=1 快速加载
     dataset = LerobotPI0Dataset(
@@ -78,6 +99,20 @@ def load_normalization_stats_from_dataset(dataset_path):
         'action_mean': np.array(stats["actions"]["mean"], dtype=np.float32),
         'action_std': np.array(stats["actions"]["std"], dtype=np.float32)
     }
+    # 🔥 保存缓存
+    cache_data = {
+        'state': {
+            'mean': norm_stats['state_mean'].tolist(),
+            'std': norm_stats['state_std'].tolist()
+        },
+        'actions': {
+            'mean': norm_stats['action_mean'].tolist(),
+            'std': norm_stats['action_std'].tolist()
+        }
+    }
+    
+    with open(cache_file, 'w') as f:
+        json.dump(cache_data, f, indent=2)
         
     print(f"   State: mean={norm_stats['state_mean'][:3]}, std={norm_stats['state_std'][:3]}")
     print(f"   Action: mean={norm_stats['action_mean'][:3]}, std={norm_stats['action_std'][:3]}")
