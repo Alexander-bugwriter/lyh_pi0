@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .normalizers import Normalizer
 from .dataset_config import get_dataset_info, generate_delta_timestamps
-
+import time
 
 
 
@@ -147,7 +147,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
     """增强版数据集 - 支持spatial features和历史信息"""
     
     def __init__(self, repo_id=None, root=None, image_size=224, action_horizon=50,
-                 dataset_fps=10.0, debug_episodes=None, spatial_features_dir=None):
+                 dataset_fps=10.0, debug_episodes=None, spatial_features_dir=None,use_history=False):
         
         super().__init__(repo_id, root, image_size, action_horizon, dataset_fps, debug_episodes)
         print(f"DEBUG: spatial_features_dir = {spatial_features_dir}")
@@ -158,11 +158,15 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
         self.spatial_features_cache = {}
         self.episode_frame_mapping = {}  # 🔥 新增这一行
         self.debug_episodes = debug_episodes
-
-
+        self.use_history=use_history
+        # 🔥 新增：LRU缓存（运行时动态，不保存到文件）
+        self._episode_data_cache = {}     # episode_id -> 完整的episode_features数据
+        self._cache_access_order = []     # 记录访问顺序（用于LRU淘汰）
+        self._cache_max_size = 50         # 缓存50个episodes（约2-5GB，根据内存调整）
         if spatial_features_dir:
             self._load_spatial_features_index()
-            self._build_episode_frame_mapping()  # 🔥 新增这一行调用
+            if use_history:
+                self._build_episode_frame_mapping()  # 🔥 新增这一行调用
 
     @staticmethod
     def load_single_file(file_path):
@@ -329,10 +333,10 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             return []
         
         # 加载该episode的spatial特征文件
-        file_path = self.spatial_features_cache[episode_id]  # 🔥 使用正确的属性名
-        with open(file_path, 'rb') as f:
-            episode_features = pickle.load(f)
-        
+        #file_path = self.spatial_features_cache[episode_id]  # 🔥 使用正确的属性名
+        #with open(file_path, 'rb') as f:
+            #episode_features = pickle.load(f)
+        episode_features = self._load_episode_features(episode_id)
         for hist_frame_idx in history_indices:
             # 1. 从dataset获取原始图像
             dataset_idx = self.episode_frame_mapping.get((episode_id, hist_frame_idx))
@@ -380,12 +384,41 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             })
         
         return history_frames
+    
+    def _load_episode_features(self, episode_id):
+        """🔥 带LRU缓存的episode特征加载"""
+    
+        # 缓存命中
+        if episode_id in self._episode_data_cache:
+            # 更新访问顺序（移到最后）
+            self._cache_access_order.remove(episode_id)
+            self._cache_access_order.append(episode_id)
+            return self._episode_data_cache[episode_id]
+    
+        # 缓存未命中，从文件加载
+        file_path = self.spatial_features_cache[episode_id]
+        with open(file_path, 'rb') as f:
+            episode_features = pickle.load(f)
+    
+        # 添加到缓存
+        self._episode_data_cache[episode_id] = episode_features
+        self._cache_access_order.append(episode_id)
+    
+        # LRU淘汰：如果缓存满了，删除最旧的
+        if len(self._episode_data_cache) > self._cache_max_size:
+            oldest_episode = self._cache_access_order.pop(0)
+            del self._episode_data_cache[oldest_episode]
+    
+        return episode_features
+
 
     def __getitem__(self, idx):
         """🔥 这是唯一需要添加的方法"""
+        start = time.time()
         item = self.dataset[idx]
+        t1 = time.time()
         normalized_item = self.normalizer.normalize(item)
-        
+        t2 = time.time()
         # 图像处理（与父类相同）
         images = {}
         
@@ -404,7 +437,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
                 wrist_image = wrist_image.squeeze()
             wrist_image = (wrist_image * 255).to(torch.uint8)
             images["left_wrist_0_rgb"] = wrist_image
-        
+        t3 = time.time()
         # 🔥 加载对应的预计算特征（包含历史信息）
         precomputed_spatial_features = None
         if self.spatial_features_dir:
@@ -427,10 +460,13 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             #             break
             # 🔥 新逻辑：动态加载历史if episode_id in self.spatial_path_index:
             if episode_id in self.spatial_features_cache:
-                file_path = self.spatial_features_cache[episode_id]
-                with open(file_path, 'rb') as f:
-                    episode_features = pickle.load(f)
-                
+                t_load_start = time.time()
+                episode_features = self._load_episode_features(episode_id)
+                t_load_end = time.time()
+                #file_path = self.spatial_features_cache[episode_id]
+                #with open(file_path, 'rb') as f:
+                    #episode_features = pickle.load(f)
+                t_search_start = time.time()
                 for frame_feat in episode_features['features']:
                     if frame_feat['frame_index'] == frame_id:
                         precomputed_spatial_features = {
@@ -441,7 +477,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
                         }
                         
                         # 🔥 如果有历史索引,动态加载历史帧
-                        if 'history_info' in frame_feat:
+                        if 'history_info' in frame_feat and self.use_history:
                             history_info = frame_feat['history_info']
                             history_indices = history_info['history_indices']
                             
@@ -457,7 +493,11 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
                                 'history_frames': history_frames  # 完整的历史帧数据
                             }
                         break
-        
+                t_search_end = time.time()
+        t4 = time.time()
+        #t3 = time.time()
+        #if idx % 100 == 0:
+            #print(f"Dataset[{idx}]: base={t1-start:.3f}s, image={t2-t1:.3f}s, spatial={t3-t2:.3f}s")
         # 任务指令（与父类相同）
         task_text = item.get("task", "complete the task")
         if isinstance(task_text, str):
@@ -478,11 +518,21 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             "prompt": prompt,
             "episode_index": item["episode_index"],
         }
-        
         # 🔥 添加预计算特征（如果有）
         if precomputed_spatial_features is not None:
             result["precomputed_spatial_features"] = precomputed_spatial_features
-        
+        t5 = time.time()
+        if idx % 100 == 0:
+            print(f"Dataset[{idx}]: "
+              f"base={t1-start:.3f}s, "
+              f"normalize={t2-t1:.3f}s, "
+              f"image={t3-t2:.3f}s, "
+              f"load_episode={t_load_end-t_load_start:.3f}s, "
+              f"search_frame={t_search_end-t_search_start:.3f}s, "
+              #f"load_history={(t_history_end-t_history_start) if 'history_info' in frame_feat else 0:.3f}s, "
+              f"other={t5-t4:.3f}s, "
+              f"cache_size={len(self._episode_data_cache)}/{self._cache_max_size}")
+
         return result
     
 def enhanced_collate_fn(batch):

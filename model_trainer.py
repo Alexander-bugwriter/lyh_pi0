@@ -51,7 +51,8 @@ from safetensors.torch import save_model
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.configs.policies import PreTrainedConfig
 from V3R_pi0.modeling_pi0 import PI0Policy
-from utils.spatiotemporal_lerobot_dataset import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
+#from utils.spatiotemporal_lerobot_dataset import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
+from utils.spatiotemporal_lerobot_dataset_indexed import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
 from peft import PeftModel,get_peft_model, LoraConfig, TaskType
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, OneCycleLR
 
@@ -460,7 +461,7 @@ class ModelCheckpointCallback(L.Callback):
 
 class SimpleDataModule(L.LightningDataModule):
     def __init__(self, repo_id, root, spatial_features_dir, debug_episodes,
-                 batch_size, num_workers):
+                 batch_size, num_workers, use_history):
         super().__init__()
         
         # Enhanced_LerobotPI0Dataset 的参数
@@ -471,7 +472,7 @@ class SimpleDataModule(L.LightningDataModule):
         self.dataset_fps = 10.0
         self.debug_episodes = debug_episodes
         self.spatial_features_dir = spatial_features_dir
-        
+        self.use_history=use_history
         # DataLoader 的参数
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -485,6 +486,7 @@ class SimpleDataModule(L.LightningDataModule):
             dataset_fps=self.dataset_fps,
             debug_episodes=self.debug_episodes,
             spatial_features_dir=self.spatial_features_dir,
+            use_history=self.use_history
         )
         
     def train_dataloader(self):
@@ -528,8 +530,10 @@ def train_with_mode(args):
 
     if args.use_history_features:
         history_camera_config = {"base_0_rgb": True, "left_wrist_0_rgb": True, "right_wrist_0_rgb": False}
+        use_history=True
     else:
         history_camera_config = {"base_0_rgb": False, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
+        use_history=False
     policy = PI0Policy(
         config,
         components_path=args.components_path,
@@ -571,6 +575,7 @@ def train_with_mode(args):
         debug_episodes=args.debug_episodes,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        use_history=use_history
     )
     # dataset = Enhanced_LerobotPI0Dataset(
     #     repo_id=args.data_repo_id,
