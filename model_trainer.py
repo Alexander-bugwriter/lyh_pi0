@@ -626,8 +626,12 @@ def train_with_mode(args):
     )
 
     # trainer.fit(lightning_module, dataloader)
-    trainer.fit(lightning_module, datamodule)
-    
+    #trainer.fit(lightning_module, datamodule)
+    if args.ckpt_path:
+        print(f"从checkpoint恢复训练: {args.ckpt_path}")
+        trainer.fit(lightning_module, datamodule, ckpt_path=args.ckpt_path)
+    else:
+        trainer.fit(lightning_module, datamodule)
     print(f"✅ 训练完成: {args.mode}")
     final_path = save_dir / "final"
     print(f"📁 最终模型: {final_path}")
@@ -654,7 +658,8 @@ def main():
                        help="Pi0基础模型路径")
     parser.add_argument("--components_path", type=str, default=None,
                        help="组件加载路径 (用于加载预训练的fusion组件)")
-    
+    parser.add_argument("--ckpt_path", type=str, default=None,
+                   help="完整恢复训练状态的checkpoint路径（用于中断续训）")    
     # 数据参数
     parser.add_argument("--data_repo_id", type=str, default=None,
                        help="LeRobot数据集ID") 
