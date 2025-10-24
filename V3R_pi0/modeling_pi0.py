@@ -91,7 +91,7 @@ class PI0Policy(PreTrainedPolicy):
             history_sampling_method=history_sampling_method,
             history_camera_config = history_camera_config,
         )
-        self.model = PI0FlowMatching(config,paligemma_with_expert_config)
+        self.model = PI0FlowMatching(config,paligemma_with_expert_config,mode)
 
         self.use_spatial_encoder = use_spatial_encoder
         self.use_history_features = use_history_features
@@ -277,7 +277,7 @@ class PI0Policy(PreTrainedPolicy):
 
     def _enhance_prompt_based_on_config(self, original_prompt: str) -> str:
         """🔥 基于配置增强prompt（不管训练还是推理都基于配置决定）"""
-        
+        return original_prompt 
         # 检查是否需要增强
         has_spatial_enhancement = self.use_spatial_encoder 
         has_history_enhancement = self.use_history_features  
@@ -288,7 +288,7 @@ class PI0Policy(PreTrainedPolicy):
         if has_spatial_enhancement:
             enhanced_prompt += "\nSpatial Enhancement: Advanced 3D geometry and depth perception available. Use spatial information for precise manipulation."
         elif has_history_enhancement:
-            enhanced_prompt += "\nTemporal Context: History frames seperated by special token are provided with current view. Understand the temporal imformation of the total task and finish it."
+            enhanced_prompt += "\nTemporal Context: History frames seperated by special token are provided. Understand the temporal imformation of the total task and finish it."
         elif has_spatial_enhancement and has_history_enhancement:
             enhanced_prompt += "\nMultimodal Integration: Combine spatial and temporal information for comprehensive scene understanding. History frames seperated by special token are provided with current view. All the images are enhanced by spatial information.Please focus on the task and finish it."
         
@@ -328,7 +328,7 @@ class PI0Policy(PreTrainedPolicy):
             prompt = [p if p.startswith("<bos>") else f"<bos>{p}" for p in prompt]
             prompt = [self._enhance_prompt_based_on_config(p) for p in prompt]  # 🔥 新增这一行
             prompt = [p if p.endswith("\n") else f"{p}\n" for p in prompt]
-            print("prompt:",prompt)
+            #print("prompt:",prompt)
             tokenized_prompt = self.language_tokenizer.__call__(
                 prompt,
                 padding="max_length",
@@ -375,7 +375,7 @@ class PI0FlowMatching(nn.Module):
 
     """
 
-    def __init__(self, config,paligemma_with_expert_config):
+    def __init__(self, config,paligemma_with_expert_config,mode):
         super().__init__()
         self.config = config
 
@@ -408,12 +408,14 @@ class PI0FlowMatching(nn.Module):
         )
 
         self.set_requires_grad()
-        self._initialize_device_management()
+        if mode == "infer":
+            self._initialize_device_management()
     def _initialize_device_management(self):
         """模仿VLM3R的设备管理策略"""
         # 确保spatial_tower正确加载和设备管理
         if torch.cuda.is_available():
-            target_device = torch.device("cuda:0")  # 或从self.device获取
+            #target_device = torch.device("cuda:0")  # 或从self.device获取
+            target_device = torch.device(f"cuda:{torch.cuda.current_device()}")
             print(f"Moving paligemma_with_expert to {target_device}...")
             self.paligemma_with_expert = self.paligemma_with_expert.to(target_device)
             print(f"Now paligemma_with_expert is on {target_device}...")
@@ -458,8 +460,8 @@ class PI0FlowMatching(nn.Module):
     
         for name, layer in projection_layers:
             if layer is not None:
-                setattr(self, name, layer.to(device))
-                print(f"{name:20s} -> {device}")
+                setattr(self, name, layer.to(target_device))
+                print(f"{name:20s} -> {target_device}")
 
 
 

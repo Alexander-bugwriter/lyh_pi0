@@ -184,9 +184,9 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             print(f"从缓存加载索引: {index_cache_file}")
             with open(index_cache_file, 'rb') as f:
                 cache_data = pickle.load(f)
-                spatial_files_index  = cache_data['spatial_features_cache']
+                spatial_files_index  = cache_data['spatial_path_index']
             print(f"索引缓存加载成功，共 {len(spatial_files_index)} 个episodes")
-
+            self.spatial_features_cache = spatial_files_index
             # 🔥 还是打印验证信息
             #self._print_cache_validation()
         else:
@@ -216,7 +216,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             with open(index_cache_file, 'wb') as f:
                 pickle.dump({'spatial_path_index': spatial_files_index}, f)
             print(f"路径索引已缓存到: {index_cache_file}")
-            
+            self.spatial_features_cache = spatial_files_index
             #self._print_cache_validation()
         # 🔥 第二步：根据路径索引，单线程读取所有数据到内存
         # print(f"单线程加载 {len(spatial_files_index)} 个特征文件到内存...")
