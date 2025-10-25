@@ -48,31 +48,34 @@ class LerobotPI0Dataset(Dataset):
                 self.normalizer = cache_data['normalizer']
                 print(f"缓存加载成功，数据集长度: {len(self.dataset)}")
         else:
-            self.dataset = LeRobotDataset(repo_id=repo_id, root=root, episodes=episodes)
             
-            # 配置数据集信息
-            dataset_info = get_dataset_info(
-                data_dir=root,
-                dataset_fps=dataset_fps,
-                action_horizon=action_horizon
-            )
-            
+            image_transforms = Resize((image_size, image_size))
+            info = get_dataset_info(root)
+            delta_timestamps = generate_delta_timestamps(info['fps'], info['features'], action_horizon)
+
+            self.dataset = LeRobotDataset(
+                    repo_id=repo_id,
+                    root=root,
+                    image_transforms=image_transforms,
+                    delta_timestamps=delta_timestamps,
+                    episodes=episodes
+                )
+            print(f"数据集加载成功，共 {len(self.dataset)} 条数据")
             self.normalizer = Normalizer(
-                dataset_info["stats"],
-                mode="min_max"
+                norm_stats=self.dataset.meta.stats,
+                norm_type={
+                    "image": "identity",
+                    "wrist_image": "identity",
+                    "state": "meanstd",
+                    "actions": "meanstd",
+                }
             )
-            
-            # 保存缓存
-            print(f"保存缓存到: {cache_path}")
             with open(cache_path, 'wb') as f:
                 pickle.dump({
                     'dataset': self.dataset,
                     'normalizer': self.normalizer
                 }, f)
-            print(f"缓存保存成功")
-        
-        self.image_size = image_size
-        self.action_horizon = action_horizon
+            print(f"已缓存到: {cache_path}")
 
     def __len__(self):
         return len(self.dataset)
@@ -141,7 +144,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
         if spatial_features_dir:
             # 🔥 检查是否存在重整后的索引文件
             debug_suffix = f"_{self.debug_episodes}" if self.debug_episodes is not None else "_all"
-            history_suffix = "_with_history" if use_history else ""
+            history_suffix = "_with_history"
             indexed_filename = f"spatial_features_indexed{history_suffix}{debug_suffix}.h5"
             indexed_path = Path(spatial_features_dir) / indexed_filename
             
@@ -171,21 +174,6 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
         # 1. 获取所有 spatial features 文件
         features_dir = Path(self.spatial_features_dir)
         
-        #if self.use_history:
-        #    feature_files = list(features_dir.glob("episode_spatial_features_with_history_*.pkl"))
-        #    if not feature_files:
-        #        raise FileNotFoundError(
-        #            f"use_history=True 但未找到 episode_spatial_features_with_history_*.pkl 文件"
-        #        )
-        #    print(f"📁 使用带历史信息的 spatial features")
-        #else:
-        #    feature_files = list(features_dir.glob("episode_spatial_features_*.pkl"))
-        #    if not feature_files:
-        #        raise FileNotFoundError(
-        #            f"未找到 episode_spatial_features_*.pkl 文件在 {features_dir}"
-        #        )
-        #    print(f"📁 使用标准 spatial features（无历史信息）")
-        
         feature_files = list(features_dir.glob("episode_spatial_features_with_history_*.pkl"))
         if not feature_files:
             # 如果没找到，再找标准文件
@@ -205,6 +193,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
             print(f"🔧 调试模式：只处理前 {self.debug_episodes} 个episodes")
         
         print(f"📊 总计 {len(feature_files)} 个 episode 文件")
+
         
         # 2. 加载所有 episode features 到内存（一次性）
         print("📥 加载所有 episode features 到内存...")
@@ -221,6 +210,30 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
         
         print(f"✅ 成功加载 {len(episode_features)} 个episodes")
         
+        # 尝试加载缓存的索引映射
+        debug_suffix = f"_{self.debug_episodes}" if self.debug_episodes is not None else "_all"
+        frame_map_cache_file = features_dir / f".episode_frame_mapping{debug_suffix}.pkl"
+
+        if frame_map_cache_file.exists():
+            print(f"📂 从缓存加载索引映射: {frame_map_cache_file}")
+            with open(frame_map_cache_file, 'rb') as f:
+                frame_map = pickle.load(f)
+            print(f"✅ 索引映射加载完成，共 {len(frame_map)} 条")
+        else:
+            print("🔍 建立 (episode_id, frame_id) -> dataset_idx 映射...")
+            frame_map = {}
+            for idx in tqdm(range(len(self.dataset)), desc="建立索引"):
+                item = self.dataset[idx]
+                episode_id = item["episode_index"].item()
+                frame_id = item.get("frame_index", idx).item()
+                frame_map[(episode_id, frame_id)] = idx
+            
+            # 保存缓存
+            print(f"💾 保存索引映射到: {frame_map_cache_file}")
+            with open(frame_map_cache_file, 'wb') as f:
+                pickle.dump(frame_map, f)
+            print(f"✅ 索引映射完成，共 {len(frame_map)} 条")
+
         # 3. 按照 dataset 顺序重整
         print(f"🔄 重整为 frame-level 格式（总共 {len(self.dataset)} 帧）...")
         
@@ -283,18 +296,21 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
                         grp.create_dataset('history_indices', data=history_indices)
                         
                         # 保存每个历史帧的 dataset_idx（用于快速查找）
-                        history_dataset_indices = []
-                        for hist_frame_id in history_indices:
+                        #history_dataset_indices = []
+                        #for hist_frame_id in history_indices:
                             # 查找这个历史帧在 dataset 中的索引
-                            hist_dataset_idx = -1
-                            for check_idx in range(len(self.dataset)):
-                                check_item = self.dataset[check_idx]
-                                if (check_item["episode_index"].item() == episode_id and 
-                                    check_item.get("frame_index", check_idx).item() == hist_frame_id):
-                                    hist_dataset_idx = check_idx
-                                    break
-                            history_dataset_indices.append(hist_dataset_idx)
-                        
+                            #hist_dataset_idx = -1
+                            #for check_idx in range(len(self.dataset)):
+                                #check_item = self.dataset[check_idx]
+                                #if (check_item["episode_index"].item() == episode_id and 
+                                    #check_item.get("frame_index", check_idx).item() == hist_frame_id):
+                                    #hist_dataset_idx = check_idx
+                                    #break
+                            #history_dataset_indices.append(hist_dataset_idx)
+                        history_dataset_indices = [
+                            frame_map.get((episode_id, hist_fid), -1) 
+                            for hist_fid in history_indices
+                        ]
                         grp.create_dataset('history_dataset_indices', data=history_dataset_indices)
                         grp.attrs['has_history'] = True
                     else:
@@ -438,7 +454,7 @@ class Enhanced_LerobotPI0Dataset(LerobotPI0Dataset):
     
     def __del__(self):
         """关闭 HDF5 文件"""
-        if self.spatial_h5_file is not None:
+        if hasattr(self, 'spatial_h5_file') and self.spatial_h5_file is not None:
             self.spatial_h5_file.close()
 
 

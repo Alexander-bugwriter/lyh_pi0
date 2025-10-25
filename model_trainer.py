@@ -40,6 +40,8 @@ lerobot.common.utils.utils.is_torch_device_available = patched_is_torch_device_a
 print("设备检查函数已修复")
 
 import os
+os.environ['HF_HOME'] = '/opt/liblibai-models/user-workspace2/dataset/.huggingface_cache'
+os.environ['HF_DATASETS_CACHE'] = '/opt/liblibai-models/user-workspace2/dataset/.huggingface_cache/datasets'
 import argparse
 import torch
 import pytorch_lightning as L
