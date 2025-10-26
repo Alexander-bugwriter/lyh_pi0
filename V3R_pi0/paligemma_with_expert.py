@@ -285,20 +285,18 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
             return
         else:
             components_path = Path(components_path)
-            lora_adapter_path = components_path / "lora_adapter"
-            if lora_adapter_path.exists():
-                try:
-                    language_model = self.paligemma.language_model
-                    # 直接加载，PEFT默认就是trainable的
-                    peft_model = PeftModel.from_pretrained(language_model, lora_adapter_path)
-                    self.paligemma.language_model = peft_model
-                    print(f"加载LoRA adapter用于继续训练: {lora_adapter_path}")
-                except Exception as e:
-                    print(f"LoRA加载失败: {e}")
-            # lora_adapter_path = components_path / "lora_adapter"
-            # if lora_adapter_path.exists():
-            #     print("lora存在于指定路径")
-            #     self._merge_lora_adapter(lora_adapter_path)
+            #lora_adapter_path = components_path / "lora_adapter"
+            paligemma_lora = components_path / "paligemma_lora_adapter"
+            if paligemma_lora.exists():
+                language_model = self.paligemma.language_model
+                peft_model = PeftModel.from_pretrained(language_model, paligemma_lora, is_trainable=True)
+                self.paligemma.language_model = peft_model
+                print(f"Loaded PaliGemma LoRA")
+            expert_lora = components_path / "gemma_expert_lora_adapter"
+            if expert_lora.exists():
+                peft_model = PeftModel.from_pretrained(self.gemma_expert, expert_lora, is_trainable=True)
+                self.gemma_expert = peft_model
+                print(f"Loaded Gemma Expert LoRA")
             modules_config = {
                 'fusion_block': {
                     'path': components_path / 'fusion_block.pth',
@@ -332,22 +330,8 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                             print(f"加载{config['name']}: {config['path']}")
                     except Exception as e:
                         print(f"加载{config['name']}失败: {e}，使用随机初始化")
-            else:
-                print(f"{config['name']}不存在，使用随机初始化")
-    def _merge_lora_adapter(self, lora_adapter_path):
-        """直接合并LoRA adapter"""
-        print(f"合并LoRA adapter: {lora_adapter_path}")
-    
-        try:
-            language_model = self.paligemma.language_model
-            peft_model = PeftModel.from_pretrained(language_model, lora_adapter_path)
-            merged_model = peft_model.merge_and_unload()
-            self.paligemma.language_model = merged_model
-        
-            print("  LoRA合并完成")
-        
-        except Exception as e:
-            print(f"  LoRA合并失败: {e}")
+                else:
+                    print(f"{config['name']}不存在，使用随机初始化")
 
     def save_modular_components(self, save_path=None):
         """保存训练好的模块组件"""
