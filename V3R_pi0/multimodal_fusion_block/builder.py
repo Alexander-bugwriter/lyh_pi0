@@ -27,7 +27,8 @@ class CrossAttentionFusion(nn.Module):
         # projection
         self.out_proj = nn.Linear(d_attn, d_clip)
         nn.init.constant_(self.out_proj.weight, 0.0)
-        nn.init.constant_(self.out_proj.bias, 0.0) 
+        nn.init.constant_(self.out_proj.bias, 0.0)
+        print("zero-init fusion block")
         # dropout
         self.dropout = nn.Dropout(0.1)
 
