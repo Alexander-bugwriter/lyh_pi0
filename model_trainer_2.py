@@ -122,9 +122,15 @@ class Lerobot_Trainer(L.LightningModule):
         paligemma_model = self.policy.model.paligemma_with_expert
         for param in paligemma_model.parameters():
             param.requires_grad = False
+        # if hasattr(paligemma_model, 'spatial_separator_token'):
+        #     paligemma_model.spatial_separator_token.requires_grad = True
+        #     print("  ✅ spatial_separator_token -> 可训练")
+        # else:
+        #     print(" spatial_separator_token -> 不存在")
         if hasattr(paligemma_model, 'spatial_separator_token'):
-            paligemma_model.spatial_separator_token.requires_grad = True
-            print("  ✅ spatial_separator_token -> 可训练")
+            for param in paligemma_model.spatial_separator_token.parameters():
+                param.requires_grad = True
+            print("  ✅ spatial_separator_token (时序感知) -> 可训练")
         else:
             print(" spatial_separator_token -> 不存在")
         

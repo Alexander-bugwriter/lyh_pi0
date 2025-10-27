@@ -69,13 +69,19 @@ class TrainingMode:
     # ADAPTIVE_SEP = "adaptive_sep"     # 自适应分隔符训练
 
 # 🎯 LoRA配置 (硬编码，经验值)
-LORA_CONFIG = {
-    "r": 128,
-    "lora_alpha": 256, 
+LORA_CONFIG_2B = {
+    "r": 16,
+    "lora_alpha": 16,
     "lora_dropout": 0.1,
-    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"]
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 }
 
+LORA_CONFIG_300M = {
+    "r": 32,
+    "lora_alpha": 32,
+    "lora_dropout": 0.1,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+}
 class Lerobot_Trainer(L.LightningModule):
     """简化版PI0 Lightning训练器 - 支持精确的组件训练控制"""
     
@@ -116,12 +122,17 @@ class Lerobot_Trainer(L.LightningModule):
         paligemma_model = self.policy.model.paligemma_with_expert
         for param in paligemma_model.parameters():
             param.requires_grad = False
+        # if hasattr(paligemma_model, 'spatial_separator_token'):
+        #     paligemma_model.spatial_separator_token.requires_grad = True
+        #     print("  ✅ spatial_separator_token -> 可训练")
+        # else:
+        #     print(" spatial_separator_token -> 不存在")
         if hasattr(paligemma_model, 'spatial_separator_token'):
-            paligemma_model.spatial_separator_token.requires_grad = True
-            print("  ✅ spatial_separator_token -> 可训练")
+            for param in paligemma_model.spatial_separator_token.parameters():
+                param.requires_grad = True
+            print("  ✅ spatial_separator_token (时序感知) -> 可训练")
         else:
-            print(" spatial_separator_token -> 不存在")
-        
+            print(" spatial_separator_token -> 不存在") 
     def _setup_fusion_only(self):
         """模式1: 只训练Cross Attention融合模块"""
         print("模式1: 只训练Cross Attention融合模块")
@@ -170,42 +181,47 @@ class Lerobot_Trainer(L.LightningModule):
         print("  ✅ Spatial_separator_token + VLM LoRA -> 可训练")
     
     def _setup_vlm_lora(self):
-        """配置VLM的LoRA微调 (硬编码配置)"""
+        """对 PaliGemma (2B) 和 Gemma Expert (300M) 应用不同的 LoRA"""
         paligemma_model = self.policy.model.paligemma_with_expert
+    
+        # PaliGemma Language Model (2B) - rank=16
         language_model = paligemma_model.paligemma.language_model
-        
-        # 检查是否已有LoRA
-        if (hasattr(language_model, 'peft_config') and 
-            language_model.peft_config is not None and 
-            len(language_model.peft_config) > 0):
-            print(" LoRA已配置，启用训练")
+        if not (hasattr(language_model, 'peft_config') and language_model.peft_config):
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=LORA_CONFIG_2B["r"],
+                lora_alpha=LORA_CONFIG_2B["lora_alpha"],
+                lora_dropout=LORA_CONFIG_2B["lora_dropout"],
+                target_modules=LORA_CONFIG_2B["target_modules"]
+            )
+            paligemma_model.paligemma.language_model = get_peft_model(language_model, lora_config)
+            print(f"PaliGemma LoRA (2B): r={LORA_CONFIG_2B['r']}, alpha={LORA_CONFIG_2B['lora_alpha']}")
+        else:
             for name, param in language_model.named_parameters():
                 if 'lora_' in name:
                     param.requires_grad = True
                 else:
                     param.requires_grad = False
-            # 验证
-            lora_params = sum(p.numel() for n, p in language_model.named_parameters() 
-                            if p.requires_grad and 'lora_' in n)
-            print(f"LoRA参数: {lora_params:,} 可训练")
-            # 启用LoRA参数训练
-            # for param in language_model.parameters():
-            #     if param.requires_grad:
-            #         continue
-            #     param.requires_grad = True
-            # return
+    
+        # Gemma Expert (300M) - rank=32
+        gemma_expert = paligemma_model.gemma_expert
+        if not (hasattr(gemma_expert, 'peft_config') and gemma_expert.peft_config):
+            lora_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=LORA_CONFIG_300M["r"],
+                lora_alpha=LORA_CONFIG_300M["lora_alpha"],
+                lora_dropout=LORA_CONFIG_300M["lora_dropout"],
+                target_modules=LORA_CONFIG_300M["target_modules"]
+            )
+            paligemma_model.gemma_expert = get_peft_model(gemma_expert, lora_config)
+            print(f"Gemma Expert LoRA (300M): r={LORA_CONFIG_300M['r']}, alpha={LORA_CONFIG_300M['lora_alpha']}")
+        else:
+            for name, param in gemma_expert.named_parameters():
+                if 'lora_' in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
         
-        lora_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=128,
-            lora_alpha=256, 
-            lora_dropout=0.1,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]
-        )
-        
-        language_model = get_peft_model(language_model, lora_config)
-        paligemma_model.paligemma.language_model = language_model
-        print("  ✅ 新建LoRA (r=128, alpha=256)")
     
     def _print_trainable_stats(self):
         """打印可训练参数统计"""
@@ -236,28 +252,38 @@ class Lerobot_Trainer(L.LightningModule):
     def configure_optimizers(self):
         """配置优化器 (复用原有逻辑，根据模式调整学习率)"""
         trainable_params = [p for p in self.policy.parameters() if p.requires_grad]
-        
-        if not trainable_params:
+        # 分组参数
+        lora_params = []
+        fusion_params = []
+    
+        for name, param in self.policy.parameters():
+            if not param.requires_grad:
+                continue
+            if 'lora_' in name:
+                lora_params.append(param)
+            elif any(x in name for x in ['fusion_block', 'mm_projector', 'spatial_separator']):
+                fusion_params.append(param)
+    
+        if not lora_params and not fusion_params:
             raise RuntimeError("没有找到可训练参数！检查training_mode设置")
-        
-        # 🎯 根据训练模式调整学习率
-        if self.training_mode == TrainingMode.FUSION_ONLY:
-            lr = self.learning_rate  # 使用指定学习率 (通常较大，如5e-4)
-        elif self.training_mode == TrainingMode.FUSION_AND_VLM:
-            lr = self.learning_rate  # VLM模式使用较小学习率 (如2e-5)
-            # TODO: 后续可以考虑不同组件使用不同学习率？
-        else:
-            lr = self.learning_rate
-        
-        optimizer = torch.optim.AdamW(
-            trainable_params, 
-            lr=lr,
-            weight_decay=1e-2,
-            eps=1e-6
-        )
+    
+        # 分组学习率
+        param_groups = []
+        if lora_params:
+            param_groups.append({'params': lora_params, 'lr': self.learning_rate, 'weight_decay': 1e-2})
+        if fusion_params:
+            param_groups.append({'params': fusion_params, 'lr': 5e-4, 'weight_decay': 1e-2}) 
+
+        #optimizer = torch.optim.AdamW(
+        #    trainable_params, 
+        #    lr=lr,
+        #    weight_decay=1e-2,
+        #    eps=1e-6
+        #)
+        optimizer = torch.optim.AdamW(param_groups, eps=1e-6)
         total_steps = self.trainer.estimated_stepping_batches
-        warmup_steps = int(total_steps * 0.05)  # 前5%用于warmup
-        
+        #warmup_steps = int(total_steps * 0.03)  # 前3%用于warmup
+        warmup_steps=1000
         # 阶段1: Warmup (0 → lr)
         warmup_scheduler = LinearLR(
             optimizer,
@@ -265,20 +291,17 @@ class Lerobot_Trainer(L.LightningModule):
             end_factor=1.0,
             total_iters=warmup_steps
         )
-        
         # 阶段2: 余弦衰减 (lr → lr/10)
         cosine_scheduler = CosineAnnealingLR(
             optimizer,
             T_max=total_steps - warmup_steps,
-            eta_min=lr * 0.1  # 2.5e-6
+            eta_min=2.5e-6  # 2.5e-6
         )
-        
         scheduler = SequentialLR(
             optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
             milestones=[warmup_steps]
         )
-        
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -343,16 +366,16 @@ class Lerobot_Trainer(L.LightningModule):
         paligemma_model = self.policy.model.paligemma_with_expert
 
         # 1. 保存LoRA adapter（如果存在）
-        has_lora = False
-        if (hasattr(paligemma_model, 'paligemma') and 
-            hasattr(paligemma_model.paligemma, 'language_model')):
-            
-            language_model = paligemma_model.paligemma.language_model
-            if hasattr(language_model, 'save_pretrained'):  # 是PEFT模型
-                adapter_dir = save_dir / "lora_adapter"
-                language_model.save_pretrained(adapter_dir)
-                print(f"  ✅ LoRA adapter -> {adapter_dir}")
-                has_lora = True
+        backbone_has_lora = False    
+        language_model = paligemma_model.paligemma.language_model
+        gemma_expert = paligemma_model.gemma_expert
+        if hasattr(language_model, 'save_pretrained'):  # 是PEFT模型
+            language_model.save_pretrained(save_dir / "paligemma_lora_adapter")
+            backbone_has_lora = True
+        expert_has_lora = False
+        if hasattr(gemma_expert, 'save_pretrained'):
+            gemma_expert.save_pretrained(save_dir / "gemma_expert_lora_adapter")
+            expert_has_lora=True
         
         # 2. 保存其他训练组件（fusion_block等）
         try:
@@ -366,7 +389,8 @@ class Lerobot_Trainer(L.LightningModule):
             "training_mode": self.training_mode,
             "learning_rate": self.learning_rate,
             "epoch": self.current_epoch,
-            "has_lora": has_lora,
+            "backbone_has_lora": backbone_has_lora,
+            "expert_has_lora":expert_has_lora,
             "checkpoint_type": "lora_only",  # 标记这是LoRA-only checkpoint
             "base_model_needed": True,  # 标记需要原始模型来加载
         }
@@ -387,19 +411,20 @@ class Lerobot_Trainer(L.LightningModule):
         paligemma_model = self.policy.model.paligemma_with_expert
         
         # 🔥 关键：合并LoRA到原模型
-        if (hasattr(paligemma_model, 'paligemma') and 
-            hasattr(paligemma_model.paligemma, 'language_model')):
-            
-            language_model = paligemma_model.paligemma.language_model
-            if hasattr(language_model, 'merge_and_unload'):
-                print("  🔄 合并LoRA参数到主模型...")
-                merged_model = language_model.merge_and_unload()
-                paligemma_model.paligemma.language_model = merged_model
-                print("  ✅ LoRA合并完成")
+        language_model = paligemma_model.paligemma.language_model
+        if hasattr(language_model, 'merge_and_unload'):
+            print("合并LoRA参数到主干模型...")
+            merged_model = language_model.merge_and_unload()
+            paligemma_model.paligemma.language_model = merged_model
+            print("主干模型LoRA合并完成")
+        gemma_expert = paligemma_model.gemma_expert
+        if hasattr(gemma_expert, 'merge_and_unload'):
+            print("合并LoRA参数到动作模型...")
+            paligemma_model.gemma_expert = gemma_expert.merge_and_unload()
+            print("动作模型LoRA合并完成")
         
         # 保存完整模型
         try:
-            from safetensors.torch import save_model
             save_model(self.policy, save_dir / "model.safetensors")
             print(f"  ✅ model.safetensors")
         except Exception as e:
