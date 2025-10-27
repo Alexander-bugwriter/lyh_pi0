@@ -251,7 +251,8 @@ class Lerobot_Trainer(L.LightningModule):
       
     def configure_optimizers(self):
         """配置优化器 (复用原有逻辑，根据模式调整学习率)"""
-        trainable_params = [p for p in self.policy.parameters() if p.requires_grad]
+        #trainable_params = [p for p in self.policy.parameters() if p.requires_grad]
+        print("分组设置学习率，组件采用5e-4固定编码，lora层用固定学习率")
         # 分组参数
         lora_params = []
         fusion_params = []
