@@ -31,12 +31,12 @@ class PI0Policy(PreTrainedPolicy):
         config: PI0Config,
         tokenizer_path: str = "google/paligemma-3b-pt-224",
         #新增：空间编码配置
-        use_spatial_encoder:bool =True,
+        use_spatial_encoder:bool =False,
         spatial_tower:str ="cut3r",
         spatial_tower_select_feature:str ="all",
         spatial_camera_config:dict ={
-            "base_0_rgb": True,        # 基础相机使用CUT3R空间编码
-            "left_wrist_0_rgb": True, # 手腕相机不使用空间编码
+            "base_0_rgb": False,        # 基础相机使用CUT3R空间编码
+            "left_wrist_0_rgb": False, # 手腕相机不使用空间编码
             "right_wrist_0_rgb": False,
         },
         
@@ -46,11 +46,11 @@ class PI0Policy(PreTrainedPolicy):
         components_path: str = None,
         
         #新增：历史特征配置（如果你需要的话）
-        use_history_features:bool=True,
-        num_sampled_history_frames:int=5,
+        use_history_features:bool=False,
+        num_sampled_history_frames:int=3,
         history_sampling_method:str="uniform",
         history_camera_config:dict = {
-            "base_0_rgb": True,        # 默认只有基础相机使用历史特征
+            "base_0_rgb": False,        # 默认只有基础相机使用历史特征
             "left_wrist_0_rgb": False,
             "right_wrist_0_rgb": False,
         },
@@ -326,7 +326,7 @@ class PI0Policy(PreTrainedPolicy):
         device = observation["state"].device
         if prompt is not None and (lang_tokens is None or lang_masks is None):
             prompt = [p if p.startswith("<bos>") else f"<bos>{p}" for p in prompt]
-            prompt = [self._enhance_prompt_based_on_config(p) for p in prompt]  # 🔥 新增这一行
+            #prompt = [self._enhance_prompt_based_on_config(p) for p in prompt]  # 🔥 新增这一行
             prompt = [p if p.endswith("\n") else f"{p}\n" for p in prompt]
             #print("prompt:",prompt)
             tokenized_prompt = self.language_tokenizer.__call__(
@@ -489,16 +489,6 @@ class PI0FlowMatching(nn.Module):
         bsize = images.shape[0]
         device = images.device
         dtype = images.dtype
-
-        # embed image
-        # images = einops.rearrange(images, "b n c h w -> (b n) c h w")
-        # img_emb = self.paligemma_with_expert.embed_image(images)
-        # num_patch = img_emb.shape[1]
-        # img_emb = einops.rearrange(img_emb, "(b n) l d -> b (n l) d", b=bsize)
-
-        # 🔥 关键修改：直接传递原始格式，不rearrange
-        #img_emb = self.paligemma_with_expert.embed_image(images)  # 传入(b,n,c,h,w)
-        # img_features_list = self.paligemma_with_expert.embed_image(images)
         if precomputed_spatial_features is not None:
             # 使用支持预计算特征的方法
             img_features_list = self.paligemma_with_expert.embed_image_with_preprocessing_feature(
@@ -508,69 +498,56 @@ class PI0FlowMatching(nn.Module):
             # 使用原始方法
             img_features_list = self.paligemma_with_expert.embed_image(images)
         
-        # 找到最大长度
-        max_length = max(f.shape[1] for f in img_features_list)  # 比如513
-    
-        # 手动填充features
-        padded_features = []
-        updated_masks = []
         IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
     
-        for i, features in enumerate(img_features_list):
-            camera_key = IMAGE_KEYS[i]
-        
-            # features填充
-            if features.shape[1] < max_length:
-                pad_length = max_length - features.shape[1]
+        # === 步骤2：找到最大长度 ===
+        lengths = [f.shape[1] for f in img_features_list]
+        max_length = max(lengths)
+        padded_features = []
+        padded_masks = []
+        for i, (camera_key, features) in enumerate(zip(IMAGE_KEYS, img_features_list)):
+            current_length = features.shape[1]  # 这个相机的实际长度
+            if current_length < max_length:
+                pad_length = max_length - current_length
                 padding = torch.zeros(
-                    features.shape[0], pad_length, features.shape[2],
+                    bsize, pad_length, features.shape[2],
                     dtype=features.dtype, device=features.device
                 )
-                padded_feature = torch.cat([features, padding], dim=1)
+                padded_feature = torch.cat([features, padding], dim=1)  # [B, max_length, D]
             else:
-                padded_feature = features
+                padded_feature = features  # 已经是max_length
+        
             padded_features.append(padded_feature)
         
-            # mask处理 - 两步法
-            original_mask = img_masks[:, i]  # [batch, 256] 来自prepare_images
+            # 3.2 🔥 关键：正确生成mask（逐样本处理）
+            camera_exists = img_masks[:, i]  # [B]，每个样本这个相机是否存在
         
-            # 第一步：拉升mask长度到max_length
-            # 如果原始是0就全0，如果原始是1就全1
-            if original_mask.any():
-                # camera存在 → 拉升为全1
-                stretched_mask = torch.ones(bsize, max_length, dtype=torch.bool, device=device)
-            else:
-                # camera丢失 → 拉升为全0
-                stretched_mask = torch.zeros(bsize, max_length, dtype=torch.bool, device=device)
+            # 为每个batch样本单独生成mask
+            batch_camera_masks = []
+            for batch_idx in range(bsize):
+                if camera_exists[batch_idx]:  # 这个样本的这个相机存在
+                    # 前current_length个token有效，后面padding的无效
+                    sample_mask = torch.cat([
+                        torch.ones(current_length, dtype=torch.bool, device=device),
+                        torch.zeros(max_length - current_length, dtype=torch.bool, device=device)
+                    ])
+                else:  # 这个样本的这个相机不存在（比如right_wrist）
+                    # 所有token都无效（整个相机是padding）
+                    sample_mask = torch.zeros(max_length, dtype=torch.bool, device=device)
+            
+                batch_camera_masks.append(sample_mask)
         
-            # 第二步：根据camera类型截断
-            if camera_key == "base_0_rgb":
-                # base camera：不操作（所有token都有效）
-                final_mask = stretched_mask
-            else:
-                # wrist camera：只保留前256个有效
-                final_mask = torch.zeros(bsize, max_length, dtype=torch.bool, device=device)
-                final_mask[:, :256] = stretched_mask[:, :256]  # 只有前256个保持原状态
-            
-            updated_masks.append(final_mask)
-
-        img_emb = torch.cat(padded_features, dim=1)  # [batch, total_tokens, features]
-        img_masks_updated = torch.cat(updated_masks, dim=1)  # [batch, total_tokens]
-            
-        # 🔥 embed_image应该返回(b, n, l, d)格式
-        if img_emb.dim() == 4:  # (b, n, l, d)
-            num_patches_per_img = img_emb.shape[2]
-            img_emb = img_emb.view(bsize, -1, img_emb.shape[-1])  # (b, n*l, d)
-            img_masks = einops.repeat(img_masks, "b n -> b (n l)", l=num_patches_per_img)
-        else:
-            # 兼容原有格式
-            num_patch = img_emb.shape[1] // images.shape[1]
-            img_masks = einops.repeat(img_masks, "b n -> b (n l)", l=num_patch)
-
+            camera_mask = torch.stack(batch_camera_masks, dim=0)  # [B, max_length]
+            padded_masks.append(camera_mask)
+    
+        # === 步骤4：Stack所有相机 ===
+        img_emb = torch.stack(padded_features, dim=1)  # [B, 3, max_length, D]
+        img_masks_updated = torch.stack(padded_masks, dim=1)  # [B, 3, max_length]
+        img_emb = einops.rearrange(img_emb, "b n l d -> b (n l) d")
         img_emb = img_emb.to(dtype=dtype) * (img_emb.shape[-1] ** 0.5)
         num_img_embs = img_emb.shape[1]
-        # img_masks = einops.repeat(img_masks, "b n -> b (n l)", l=num_patch)
-
+        img_masks_updated = einops.rearrange(img_masks_updated, "b n l -> b (n l)")
+        
         # embed language
         lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
         num_lang_embs = lang_emb.shape[1]
@@ -578,11 +555,7 @@ class PI0FlowMatching(nn.Module):
 
         # assemble embeddings
         embs = torch.cat([img_emb, lang_emb], dim=1)
-        pad_masks = torch.cat([img_masks, lang_masks], dim=1)
-
-        # PaliGemma uses bidirectional attention for prefix tokens,
-        # so we set 1D `att_masks` to zeros.
-        # (see `make_att_2d_masks` to understand why zeros means bidirection)
+        pad_masks = torch.cat([img_masks_updated, lang_masks], dim=1)
         att_masks = torch.zeros(
             (bsize, num_img_embs + num_lang_embs), device=device, dtype=torch.bool
         )
@@ -718,6 +691,10 @@ class PI0FlowMatching(nn.Module):
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
+        #print(f"🔥 sample_actions中:")
+        #print(f"  prefix_embs.shape: {prefix_embs.shape}")
+        #print(f"  prefix_pad_masks.shape: {prefix_pad_masks.shape}")
+        #print(f"  prefix_att_masks.shape: {prefix_att_masks.shape}")
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 

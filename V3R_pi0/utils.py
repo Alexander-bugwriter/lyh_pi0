@@ -155,6 +155,7 @@ def eager_attention_forward(
 
     #big_neg = -2.3819763e38
     big_neg = -65504.0 if query_states.dtype == torch.float16 else -2.3819763e38
+    #big_neg = -2.3819763e38
     masked_att_weights = torch.where(
         attention_mask[:, None, :, :], att_weights, big_neg
     )

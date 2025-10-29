@@ -66,7 +66,7 @@ class PaliGemmaWithExpertConfig(PretrainedConfig):
         spatial_fusion_method: str = "concat",  # "residual", "concat"
         spatial_camera_config: dict = None,  # 关键：相机级别的空间编码配置
         # 新增历史特征参数
-        use_history_features: bool = True,
+        use_history_features: bool = False,
         num_sampled_history_frames: int = 3,  # 从历史中采样的帧数 (3, 4, 5 等)
         history_sampling_method: str = "uniform",  # "uniform", "recent"
         history_camera_config: dict = None,  # 🔥 新增：控制哪些相机使用历史特征
@@ -385,10 +385,10 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 param.requires_grad = False  # CUT3R完全冻结
 
         # ✅ 新增组件：确保可训练
-        #预定义的投影器不用训练
+        #预定义的投影器用训练
         if hasattr(self, 'mm_projector') and self.mm_projector is not None:
             for params in self.mm_projector.parameters():
-                params.requires_grad = True  # 投影器需要训练
+                params.requires_grad = False  # 投影器需要训练
 
         if hasattr(self, 'fusion_block') and self.fusion_block is not None:
             for params in self.fusion_block.parameters():
@@ -431,38 +431,31 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         Returns:
             enhanced_features_list: List[(B, L, D)]
         """
+        
         batch_size = image.shape[0]
         IMAGE_KEYS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
-        
         # 根据配置决定哪些要用 spatial
         spatial_config = self.config.spatial_camera_config
         spatial_mask = [spatial_config.get(key, False) for key in IMAGE_KEYS]
-        
         # === 批次处理需要 spatial 的相机 ===
         spatial_indices = [i for i, use_spatial in enumerate(spatial_mask) if use_spatial]
-        
         if spatial_indices:
             spatial_images_list = [image[:, i] for i in spatial_indices]
             spatial_batch = torch.stack(spatial_images_list, dim=1)
             spatial_flat = spatial_batch.squeeze(0)
-            
             vision_outputs = self.paligemma.vision_tower(spatial_flat)
             raw_features = vision_outputs.last_hidden_state
-            
             # 调用 CUT3R
             with torch.no_grad():
                 camera_tokens, patch_tokens = self.spatial_tower(spatial_batch.half())
                 camera_tokens = camera_tokens.to(raw_features.dtype)
                 patch_tokens = patch_tokens.to(raw_features.dtype)
-            
             # 融合
             spatial_tokens = {'camera_tokens': camera_tokens, 'patch_tokens': patch_tokens}
             spatial_enhanced = self.fuse_2D_with_cut3r(raw_features, spatial_tokens)
-        
         # === 组装最终结果 ===
         enhanced_features_list = []
         spatial_idx = 0
-        
         for i, camera_key in enumerate(IMAGE_KEYS):
             if spatial_mask[i]:
                 # 用 spatial 处理的
@@ -470,15 +463,19 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 spatial_idx += 1
             else:
                 # 标准处理
-                current_enhanced = self.paligemma.get_image_features(image[:, i])
-            
+                #current_enhanced = self.paligemma.get_image_features(image[:, i])
+                #import inspect
+                #print(inspect.getsource(self.paligemma.get_image_features))
+                single_image = image[:, i]  # 保持维度
+                vision_outputs = self.paligemma.vision_tower(single_image)
+                raw_features = vision_outputs.last_hidden_state
+                current_enhanced = self.mm_projector(raw_features)
+                current_enhanced = current_enhanced / (self.config.paligemma_config.text_config.hidden_size ** 0.5)  #归一化对齐
             # 🔥 统一的历史特征拼接处理
             history_config = self.config.history_camera_config
             if (self.config.use_history_features and 
                 self.history_buffer is not None and 
                 history_config.get(camera_key, False)):
-                
-                
                 final_features = self.history_buffer.get_enhanced_features_with_separators(
                     current_features=current_enhanced,
                     separator_token=self.spatial_separator_token,
@@ -489,9 +486,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                 self.history_buffer.append(current_enhanced, self.spatial_separator_token, camera_key=camera_key)
             else:
                 final_features = current_enhanced
-            
             enhanced_features_list.append(final_features)
-        
         return enhanced_features_list
     
     def embed_image_with_preprocessing_feature(self, image: torch.Tensor, 
@@ -782,6 +777,8 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
         else:
             raise ValueError(f"Unsupported fusion_block type: {fusion_block_type}")
         
+        enhanced_features = enhanced_features / (self.config.paligemma_config.text_config.hidden_size ** 0.5)
+
         return enhanced_features  # 统一返回2048维的最终特征
         
         # # 展平patches维度
@@ -801,6 +798,7 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
 
 
     def embed_language_tokens(self, tokens: torch.Tensor):
+        #print("原版embed language token")
         #return self.paligemma.language_model.model.embed_tokens(tokens)
         # return self.paligemma.language_model.embed_tokens(tokens)
         return self.paligemma.language_model.get_input_embeddings()(tokens)
@@ -886,6 +884,9 @@ class PaliGemmaWithExpertModel(PreTrainedModel):
                         layer = models[i].model.layers[layer_idx]
                     except:
                         layer = models[i].layers[layer_idx]
+
+                #layer = models[i].layers[layer_idx]
+                #print("原版layer")
                 hidden_states = layer.input_layernorm(hidden_states)
                 hidden_shape = (*hidden_states.shape[:-1], -1, layer.self_attn.head_dim)
 

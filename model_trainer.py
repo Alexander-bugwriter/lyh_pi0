@@ -536,9 +536,9 @@ def train_with_mode(args):
     torch.set_float32_matmul_precision('medium')  # 或 'high' 
     # 🔧 加载基础模型
     print("📂 加载基础模型...")
-    config = PreTrainedConfig.from_pretrained(args.base_model_path)
-    config.freeze_vision_encoder = True
-    config.train_expert_only = True
+    #config = PreTrainedConfig.from_pretrained(args.base_model_path)
+    #config.freeze_vision_encoder = True
+    #config.train_expert_only = True
     
     # 🔧 创建Policy (传入组件路径)
     # policy = PI0Policy(
@@ -562,24 +562,27 @@ def train_with_mode(args):
     else:
         history_camera_config = {"base_0_rgb": False, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
         use_history=False
-    policy = PI0Policy(
-        config,
+
+    if args.use_spatial_encoder:
+        spatial_camera_config = {"base_0_rgb": True,"left_wrist_0_rgb": True,"right_wrist_0_rgb": False,}
+        use_spatial_encoder=True
+    else:
+        spatial_camera_config={"base_0_rgb": False,"left_wrist_0_rgb": False,"right_wrist_0_rgb": False,}
+        use_spatial_encoder=False
+
+    policy = PI0Policy.from_pretrained(
+        args.base_model_path,
         components_path=args.components_path,
         mode="train",
         
         # 🔥 从args获取空间编码配置
-        use_spatial_encoder=getattr(args, 'use_spatial_encoder',False),  # 默认True
+        use_spatial_encoder=use_spatial_encoder,  # 默认True
         # spatial_tower=getattr(args, 'spatial_tower', 'cut3r'),
         # spatial_tower_select_feature=getattr(args, 'spatial_tower_select_feature', 'all'),
-        spatial_camera_config=getattr(args, 'spatial_camera_config', {
-            "base_0_rgb": True,
-            "left_wrist_0_rgb": True,
-            "right_wrist_0_rgb": False,
-        }),
-        
+        spatial_camera_config=spatial_camera_config,
         # 🔥 从args获取历史特征配置
-        use_history_features=getattr(args, 'use_history_features', False),  # 默认False
-        num_sampled_history_frames=getattr(args, 'num_sampled_history_frames', 5),
+        use_history_features=use_history,  # 默认False
+        num_sampled_history_frames=getattr(args, 'num_sampled_history_frames', 3),
         # history_sampling_method=getattr(args, 'history_sampling_method', 'uniform'),
         history_camera_config=history_camera_config,
         
