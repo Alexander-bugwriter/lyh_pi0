@@ -57,7 +57,7 @@ from V3R_pi0.modeling_pi0 import PI0Policy
 from utils.spatiotemporal_lerobot_dataset_indexed import Enhanced_LerobotPI0Dataset, enhanced_collate_fn
 from peft import PeftModel,get_peft_model, LoraConfig, TaskType
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, OneCycleLR
-
+from pytorch_lightning.loggers import WandbLogger
 # 🎯 训练模式定义
 class TrainingMode:
     FUSION_ONLY = "fusion_only"        # 只训练cross attention
@@ -627,9 +627,10 @@ def train_with_mode(args):
             every_n_epochs=args.save_every_n_epochs
         )
     ]
-    
+    wandb_logger = WandbLogger(project='cut3r_pi0_training', name=f'{args.mode}_run')
     # 🔧 创建Lightning训练器 (复用原有配置)
     trainer = L.Trainer(
+        logger=wandb_logger,
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=args.devices,
         strategy="ddp_find_unused_parameters_true" if args.devices > 1 else "auto",
