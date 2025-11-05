@@ -191,21 +191,34 @@ class PI0Policy(PreTrainedPolicy):
             images, img_masks, lang_tokens, lang_masks, state, actions, noise, time,
             spatial_features=precomputed_spatial_features,
         )
-
+        losses = losses[:, :, :action_dim]
         actions_is_pad = batch.get("action_is_pad", None)
+        #if actions_is_pad is not None:
+        #    in_episode_bound = ~actions_is_pad
+        #    losses = losses * in_episode_bound.unsqueeze(-1)
+        #    loss_dict["losses_after_in_ep_bound"] = losses.clone()
         if actions_is_pad is not None:
             in_episode_bound = ~actions_is_pad
-            losses = losses * in_episode_bound.unsqueeze(-1)
-            loss_dict["losses_after_in_ep_bound"] = losses.clone()
-
-        # Remove padding
-        losses = losses[:, :, :action_dim]
+            mask = in_episode_bound.unsqueeze(-1).expand_as(losses)
+    
+            # ✅ 保留调试信息：记录mask后的losses张量
+            masked_losses = losses * mask  # padding位置为0的完整张量
+            loss_dict["losses_after_in_ep_bound"] = masked_losses.clone()
+    
+            # ✅ 正确计算loss：只对有效位置求均值
+            loss = losses[mask].mean()  # 分母=有效元素数
+        else:
+            loss = losses.mean()
         loss_dict["losses"] = losses.clone()
+        loss_dict["l2_loss"] = loss.item()
+        # Remove padding
+        #losses = losses[:, :, :action_dim]
+        #loss_dict["losses"] = losses.clone()
 
         # For backward pass
-        loss = losses.mean()
+        #loss = losses.mean()
         # For logging
-        loss_dict["l2_loss"] = loss.item()
+        #loss_dict["l2_loss"] = loss.item()
 
         return loss, loss_dict
 

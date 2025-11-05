@@ -521,6 +521,38 @@ def train_with_mode(args):
     # 🔧 加载基础模型
     print("📂 加载基础模型...")
     #config = PreTrainedConfig.from_pretrained(args.base_model_path)
+    config_path = Path(args.base_model_path) / "config.json"
+    if config_path.exists():
+        print(f"检查并修复config文件: {config_path}")
+
+        # 读取原始config
+        with open(config_path, 'r') as f:
+            config_dict = json.load(f)
+
+        # 移除训练特定字段
+        fields_to_remove = ['training_mode', 'pretrained_path']
+        removed_fields = []
+
+        for field in fields_to_remove:
+            if field in config_dict:
+                config_dict.pop(field)
+                removed_fields.append(field)
+
+        if removed_fields:
+            print(f"移除非标准字段: {removed_fields}")
+
+            # 备份原文件
+            backup_path = config_path.with_suffix('.json.backup')
+            if not backup_path.exists():
+                import shutil
+                shutil.copy(config_path, backup_path)
+                print(f"原文件已备份到: {backup_path}")
+
+            # 写回修复后的config
+            with open(config_path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+            print(f"config.json 已修复")
+
     #config.freeze_vision_encoder = True
     #config.train_expert_only = True
     

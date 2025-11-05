@@ -218,30 +218,34 @@ def run_server(host="0.0.0.0", port=8000, model_type="pi0"):
 
     # 现在可以正常加载了
     print("📂 加载基础模型...")
-    config = PreTrainedConfig.from_pretrained(args.base_model_path)
+    #config = PreTrainedConfig.from_pretrained(args.base_model_path)
     
 
     if args.use_history_features:
         history_camera_config = {"base_0_rgb": True, "left_wrist_0_rgb": True, "right_wrist_0_rgb": False}
+        use_history=True
     else:
         history_camera_config = {"base_0_rgb": False, "left_wrist_0_rgb": False, "right_wrist_0_rgb": False}
-    policy = PI0Policy(
-        config,
+        use_history=False
+    if args.use_spatial_encoder:
+        spatial_camera_config = {"base_0_rgb": True,"left_wrist_0_rgb": True,"right_wrist_0_rgb": False,}
+        use_spatial_encoder=True
+    else:
+        spatial_camera_config={"base_0_rgb": False,"left_wrist_0_rgb": False,"right_wrist_0_rgb": False,}
+        use_spatial_encoder=False
+    policy = PI0Policy.from_pretrained(
+        args.base_model_path,
         components_path=args.components_path,
         mode="infer",
         
         # 🔥 从args获取空间编码配置
-        use_spatial_encoder=getattr(args, 'use_spatial_encoder',False),  # 默认True
+        use_spatial_encoder=use_spatial_encoder,  # 默认True
         # spatial_tower=getattr(args, 'spatial_tower', 'cut3r'),
         # spatial_tower_select_feature=getattr(args, 'spatial_tower_select_feature', 'all'),
-        spatial_camera_config=getattr(args, 'spatial_camera_config', {
-            "base_0_rgb": True,
-            "left_wrist_0_rgb": True,
-            "right_wrist_0_rgb": False,
-        }),
+        spatial_camera_config=spatial_camera_config,
         
         # 🔥 从args获取历史特征配置
-        use_history_features=getattr(args, 'use_history_features', False),  # 默认False
+        use_history_features=use_history,  # 默认False
         num_sampled_history_frames=getattr(args, 'num_sampled_history_frames', 3),
         # history_sampling_method=getattr(args, 'history_sampling_method', 'uniform'),
         history_camera_config=history_camera_config,
