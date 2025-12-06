@@ -218,7 +218,9 @@ class Cut3rEncoder(nn.Module):
 
                     # Save the downsampled point cloud for the item
                     output_path = point_cloud_output_paths[b_idx]
+                    print(f"[DEBUG] trying to write point-cloud -> {output_path}")
                     o3d.io.write_point_cloud(output_path, downsampled_pcd_item)
+                    print(f"[DEBUG] wrote {len(downsampled_pcd_item.points)} points to {output_path}")
                     rank0_print(f"Saved combined and downsampled point cloud for batch item {b_idx} to {output_path}")
 
                 except (KeyError, IndexError, AttributeError, ValueError, RuntimeError, Exception) as item_e:
